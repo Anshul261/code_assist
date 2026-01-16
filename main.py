@@ -6,8 +6,11 @@ import re
 import subprocess
 import urllib.request
 import urllib.error
+from dotenv import load_dotenv
 
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
+load_dotenv()
+
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 API_URL = (
     "https://openrouter.ai/api/v1/messages"
     if OPENROUTER_KEY
