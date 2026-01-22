@@ -5,5 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "agno>=2.4.1",
     "dotenv>=0.9.9",
+    "openai>=2.15.0",
+    "psycopg2-binary>=2.9.11",
+    "sqlalchemy>=2.0.46",
 ]

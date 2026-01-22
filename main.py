@@ -272,7 +272,7 @@ def render_markdown(text):
 
 def main():
     print(
-        f"{BOLD}nanocode{RESET} | {DIM}{MODEL} ({'OpenRouter' if OPENROUTER_KEY else 'Anthropic'}) | {WORKING_DIR}{RESET}\n"
+        f"{BOLD}codeassist{RESET} | {DIM}{MODEL} ({'OpenRouter' if OPENROUTER_KEY else 'Anthropic'}) | {WORKING_DIR}{RESET}\n"
     )
     messages = []
     system_prompt = f"Concise coding assistant. cwd: {WORKING_DIR}"
