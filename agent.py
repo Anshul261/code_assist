@@ -7,20 +7,21 @@ import subprocess
 from dotenv import load_dotenv
 
 from agno.agent import Agent
+from agno.team import Team
 from agno.db.sqlite import SqliteDb
-
-# Setup SQLite database
 from agno.models.openrouter import OpenRouter
 from agno.tools.toolkit import Toolkit
+
 load_dotenv()
 
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 MODEL = os.environ.get("MODEL", "claude-sonnet-4-20250514")
 db = SqliteDb(db_file="tmp/agents.db")
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
-BLUE, CYAN, GREEN, YELLOW, RED = "\033[34m", "\033[36m", "\033[32m", "\033[33m", "\033[31m"
+BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = "\033[34m", "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m"
 
 WORKING_DIR = pathlib.Path.cwd().resolve()
+WORKSPACE_DIR = WORKING_DIR / "test"
 
 
 def safe_path(path: str) -> pathlib.Path:
@@ -32,18 +33,16 @@ def safe_path(path: str) -> pathlib.Path:
     return resolved
 
 
-class CodeAssistToolkit(Toolkit):
-    def __init__(self, **kwargs):
-        tools = [
-            self.read,
-            self.write,
-            self.edit,
-            self.glob,
-            self.grep,
-            self.bash,
-        ]
+# =============================================================================
+# TOOLKITS - Specialized tools for each agent
+# =============================================================================
 
-        super().__init__(name="code_assist_tools", tools=tools, **kwargs)
+class FileToolkit(Toolkit):
+    """Tools for file operations - reading, writing, editing, searching"""
+
+    def __init__(self, **kwargs):
+        tools = [self.read, self.write, self.edit, self.glob, self.grep]
+        super().__init__(name="file_tools", tools=tools, **kwargs)
 
     def read(self, path: str, offset: int = 0, limit: int = None) -> str:
         """Read file with line numbers (file path, not directory)"""
@@ -143,8 +142,16 @@ class CodeAssistToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def bash(self, cmd: str) -> str:
-        """Run shell command"""
+
+class BashToolkit(Toolkit):
+    """Tools for executing shell commands"""
+
+    def __init__(self, **kwargs):
+        tools = [self.bash]
+        super().__init__(name="bash_tools", tools=tools, **kwargs)
+
+    def bash(self, cmd: str, timeout: int = 120) -> str:
+        """Run shell command (default 120s timeout)"""
         try:
             print(f"  {DIM}$ {cmd}{RESET}")
             proc = subprocess.Popen(
@@ -163,14 +170,196 @@ class CodeAssistToolkit(Toolkit):
                 if line:
                     print(f"  {DIM}| {line.rstrip()}{RESET}", flush=True)
                     output_lines.append(line)
-            proc.wait(timeout=30)
+            proc.wait(timeout=timeout)
             return "".join(output_lines).strip() or "(empty)"
         except subprocess.TimeoutExpired:
             proc.kill()
-            return "(timed out after 30s)"
+            return f"(timed out after {timeout}s)"
         except Exception as err:
             return f"error: {err}"
 
+
+# =============================================================================
+# AGENT INSTRUCTIONS
+# =============================================================================
+
+DOCUMENT_CREATOR_INSTRUCTIONS = """You create professional documents (PowerPoint, Word, Excel) using JavaScript libraries.
+
+## Workspace
+All work happens in the `test/` folder. Always check if `test/package.json` exists first.
+
+## Setup (if test/package.json doesn't exist)
+1. Create test/package.json:
+```json
+{
+  "name": "workspace",
+  "type": "commonjs",
+  "dependencies": {
+    "pptxgenjs": "^3.12.0",
+    "exceljs": "^4.4.0",
+    "docx": "^8.5.0"
+  }
+}
+```
+2. Run: `cd test && npm install`
+
+## PowerPoint (pptxgenjs)
+```javascript
+const pptxgen = require("pptxgenjs");
+const pptx = new pptxgen();
+pptx.layout = "LAYOUT_16x9";
+
+const slide = pptx.addSlide();
+slide.addText("Title", { x: 0.5, y: 0.5, w: 9, h: 1, fontSize: 32, bold: true, color: "1F4E78" });
+
+// Bar chart
+slide.addChart(pptx.ChartType.bar, [
+  { name: "Series", labels: ["A", "B"], values: [10, 20] }
+], { x: 0.5, y: 2, w: 6, h: 3, showValue: true });
+
+// Pie chart
+slide.addChart(pptx.ChartType.pie, [
+  { name: "Data", labels: ["X", "Y"], values: [60, 40] }
+], { x: 0.5, y: 2, w: 5, h: 4, showPercent: true });
+
+// KPI cards
+slide.addShape(pptx.ShapeType.rect, { x: 1, y: 2, w: 2, h: 1.5, fill: { color: "E8F2FF" } });
+slide.addText("$1.5M", { x: 1, y: 2.3, w: 2, h: 0.5, fontSize: 28, bold: true, align: "center" });
+
+pptx.writeFile({ fileName: "test/output.pptx" });
+```
+
+## Excel (exceljs)
+```javascript
+const ExcelJS = require("exceljs");
+const workbook = new ExcelJS.Workbook();
+const sheet = workbook.addWorksheet("Data");
+
+sheet.columns = [
+  { header: "Name", key: "name", width: 20 },
+  { header: "Value", key: "value", width: 15 }
+];
+sheet.addRow({ name: "Item A", value: 100 });
+
+// Formulas
+sheet.getCell("C1").value = { formula: "SUM(B:B)" };
+
+// Styling
+sheet.getRow(1).font = { bold: true };
+sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "4472C4" } };
+
+workbook.xlsx.writeFile("test/output.xlsx");
+```
+
+## Word (docx)
+```javascript
+const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel } = require("docx");
+const fs = require("fs");
+
+const doc = new Document({
+  sections: [{
+    children: [
+      new Paragraph({ text: "Title", heading: HeadingLevel.HEADING_1 }),
+      new Paragraph({ children: [
+        new TextRun({ text: "Bold", bold: true }),
+        new TextRun(" normal text.")
+      ]})
+    ]
+  }]
+});
+
+Packer.toBuffer(doc).then(buffer => fs.writeFileSync("test/output.docx", buffer));
+```
+
+## Workflow
+1. Check if test/package.json exists, set up if needed
+2. Write script to test/
+3. Execute: `cd test && node script.js`
+4. Confirm output file was created
+"""
+
+DATA_ANALYST_INSTRUCTIONS = """You analyze data, read Excel/CSV files, and perform calculations using Python.
+
+## Capabilities
+- Read and analyze Excel files with pandas + openpyxl
+- Process CSV data
+- Perform statistical analysis
+- Generate insights and summaries
+
+## Workspace
+Work in the `test/` folder for any temporary files or outputs.
+
+## Excel Analysis
+```python
+import pandas as pd
+
+# Read Excel
+df = pd.read_excel("test/data.xlsx")
+print(df.head())
+print(df.describe())
+
+# Analysis
+total = df["column"].sum()
+avg = df["column"].mean()
+grouped = df.groupby("category").agg({"value": ["sum", "mean"]})
+```
+
+## CSV Analysis
+```python
+import pandas as pd
+df = pd.read_csv("test/data.csv")
+# Process as needed
+```
+
+## Workflow
+1. Read the data file
+2. Understand its structure
+3. Perform requested analysis
+4. Present clear insights with numbers
+"""
+
+CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, editing files and running commands.
+
+## Capabilities
+- Read any file in the project
+- Write new files or edit existing ones
+- Search files by name pattern (glob) or content (grep)
+- Run shell commands
+
+## Best Practices
+- Always read a file before editing it
+- Use glob to find files: `**/*.py`, `**/*.js`
+- Use grep to search content
+- Explain what you're doing
+"""
+
+TEAM_LEADER_INSTRUCTIONS = """You coordinate a team of specialized agents to help users with their tasks.
+
+## Your Team
+1. **Document Creator** - Creates PowerPoint, Word, Excel documents using JavaScript libraries
+2. **Data Analyst** - Analyzes Excel/CSV data using Python and pandas
+3. **Code Assistant** - Handles file operations, code editing, and shell commands
+
+## Delegation Guidelines
+- Document creation requests (presentations, spreadsheets, reports) → Document Creator
+- Data analysis, Excel reading, statistics → Data Analyst
+- File operations, code editing, searching → Code Assistant
+- Complex tasks may need multiple agents in sequence
+
+## Workspace
+All generated documents go in the `test/` folder.
+
+## Your Role
+- Understand what the user needs
+- Delegate to the appropriate agent(s)
+- Synthesize results into a clear response
+- If a task spans multiple domains, coordinate between agents
+"""
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 def separator():
     try:
@@ -185,20 +374,53 @@ def render_markdown(text):
 
 
 def main():
-    print(
-        f"{BOLD}agnocode{RESET} | {DIM}{MODEL} (OpenRouter via AGNO) | {WORKING_DIR}{RESET}\n"
+    print(f"{BOLD}agnocode team{RESET} | {DIM}{MODEL} (OpenRouter) | {WORKING_DIR}{RESET}\n")
+
+    # Ensure workspace directory exists
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Shared model
+    model = OpenRouter(id=MODEL, api_key=OPENROUTER_KEY)
+
+    # Create specialized agents
+    document_creator = Agent(
+        name="Document Creator",
+        role="Creates professional PowerPoint, Word, and Excel documents using JavaScript libraries",
+        tools=[FileToolkit(), BashToolkit()],
+        instructions=DOCUMENT_CREATOR_INSTRUCTIONS,
+        markdown=True,
     )
 
-    toolkit = CodeAssistToolkit()
-    agent = Agent(
-        model=OpenRouter(id=MODEL, api_key=OPENROUTER_KEY),
-        tools=[toolkit],
+    data_analyst = Agent(
+        name="Data Analyst",
+        role="Analyzes Excel/CSV data, performs calculations and statistical analysis using Python",
+        tools=[FileToolkit(), BashToolkit()],
+        instructions=DATA_ANALYST_INSTRUCTIONS,
         markdown=True,
-        num_history_sessions=10,
+    )
+
+    code_assistant = Agent(
+        name="Code Assistant",
+        role="Handles file operations, code reading/writing/editing, and shell commands",
+        tools=[FileToolkit(), BashToolkit()],
+        instructions=CODE_ASSISTANT_INSTRUCTIONS,
+        markdown=True,
+    )
+
+    # Create the team
+    team = Team(
+        name="Assistant Team",
+        members=[document_creator, data_analyst, code_assistant],
+        model=model,
+        instructions=TEAM_LEADER_INSTRUCTIONS,
+        markdown=True,
+        show_members_responses=True,
         enable_agentic_memory=True,
-        add_session_summary_to_context=True,
+        num_history_sessions=10,
         db=db,
     )
+
+    print(f"{DIM}Team members: Document Creator, Data Analyst, Code Assistant{RESET}\n")
 
     while True:
         try:
@@ -210,11 +432,11 @@ def main():
             if user_input in ("/q", "exit"):
                 break
             if user_input == "/c":
-                agent.clear_history()
+                team.clear_history()
                 print(f"{GREEN}* Cleared conversation{RESET}")
                 continue
 
-            response = agent.run(user_input)
+            response = team.run(user_input)
 
             if response and response.content:
                 print(f"\n{CYAN}*{RESET} {render_markdown(response.content)}")
@@ -227,7 +449,9 @@ def main():
         except EOFError:
             break
         except Exception as err:
+            import traceback
             print(f"{RED}* Error: {err}{RESET}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
