@@ -44,8 +44,19 @@ class FileToolkit(Toolkit):
         tools = [self.read, self.write, self.edit, self.glob, self.grep]
         super().__init__(name="file_tools", tools=tools, **kwargs)
 
-    def read(self, path: str, offset: int = 0, limit: int = None) -> str:
-        """Read file with line numbers (file path, not directory)"""
+    def read(self, path: str = None, offset: int = 0, limit: int = None) -> str:
+        """Read a file and return its contents with line numbers.
+
+        Args:
+            path: Path to the file to read (REQUIRED). Example: "test/script.js"
+            offset: Line number to start reading from (0-indexed). Default: 0
+            limit: Maximum number of lines to read. Default: all lines
+
+        Returns:
+            File contents with line numbers, or an error message.
+        """
+        if not path:
+            return "error: 'path' parameter is required. Please provide the file path to read. Example: read(path='test/script.js')"
         try:
             safe = safe_path(path)
             if not safe.exists():
@@ -60,8 +71,20 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def write(self, path: str, content: str) -> str:
-        """Write content to file"""
+    def write(self, path: str = None, content: str = None) -> str:
+        """Write content to a file, creating parent directories if needed.
+
+        Args:
+            path: Path to the file to write (REQUIRED). Example: "test/output.js"
+            content: Content to write to the file (REQUIRED)
+
+        Returns:
+            "ok" on success, or an error message.
+        """
+        if not path:
+            return "error: 'path' parameter is required. Example: write(path='test/output.js', content='...')"
+        if content is None:
+            return "error: 'content' parameter is required. Example: write(path='test/output.js', content='...')"
         try:
             safe = safe_path(path)
             safe.parent.mkdir(parents=True, exist_ok=True)
@@ -70,8 +93,24 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def edit(self, path: str, old: str, new: str, all: bool = False) -> str:
-        """Replace old with new in file (old must be unique unless all=true)"""
+    def edit(self, path: str = None, old: str = None, new: str = None, all: bool = False) -> str:
+        """Replace text in a file. The 'old' text must be unique in the file unless all=true.
+
+        Args:
+            path: Path to the file to edit (REQUIRED). Example: "test/script.js"
+            old: The exact text to find and replace (REQUIRED)
+            new: The replacement text (REQUIRED, can be empty string to delete)
+            all: If true, replace all occurrences. Default: false (requires unique match)
+
+        Returns:
+            "ok" on success, or an error message.
+        """
+        if not path:
+            return "error: 'path' parameter is required. Example: edit(path='file.js', old='old text', new='new text')"
+        if old is None:
+            return "error: 'old' parameter is required. This is the text to find and replace."
+        if new is None:
+            return "error: 'new' parameter is required. This is the replacement text."
         try:
             safe = safe_path(path)
             if not safe.exists():
@@ -88,8 +127,18 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def glob(self, pat: str, path: str = ".") -> str:
-        """Find files by pattern (e.g., **/*.py), sorted by mtime"""
+    def glob(self, pat: str = None, path: str = ".") -> str:
+        """Find files matching a glob pattern, sorted by modification time (newest first).
+
+        Args:
+            pat: Glob pattern to match (REQUIRED). Examples: "**/*.py", "test/*.js", "*.txt"
+            path: Directory to search in. Default: current directory
+
+        Returns:
+            Newline-separated list of matching file paths, or "none" if no matches.
+        """
+        if not pat:
+            return "error: 'pat' parameter is required. Example: glob(pat='**/*.py') or glob(pat='test/*.js')"
         try:
             base = safe_path(path)
             full_pattern = str(base / pat)
@@ -110,8 +159,19 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def grep(self, pat: str, path: str = ".") -> str:
-        """Search files for regex pattern"""
+    def grep(self, pat: str = None, path: str = ".") -> str:
+        """Search file contents for a regex pattern.
+
+        Args:
+            pat: Regular expression pattern to search for (REQUIRED). Example: "function.*export"
+            path: File or directory to search in. Default: current directory
+
+        Returns:
+            Matching lines in format "filepath:line_num:content", or "none" if no matches.
+            Limited to first 50 matches.
+        """
+        if not pat:
+            return "error: 'pat' parameter is required. Example: grep(pat='function') or grep(pat='import.*react')"
         try:
             pattern = re.compile(pat)
         except re.error as e:
@@ -150,8 +210,19 @@ class BashToolkit(Toolkit):
         tools = [self.bash]
         super().__init__(name="bash_tools", tools=tools, **kwargs)
 
-    def bash(self, cmd: str, timeout: int = 120) -> str:
-        """Run shell command (default 120s timeout)"""
+    def bash(self, cmd: str = None, timeout: int = 120) -> str:
+        """Execute a shell command and return its output.
+
+        Args:
+            cmd: The shell command to execute (REQUIRED). Example: "ls -la" or "npm install"
+            timeout: Maximum seconds to wait for command completion. Default: 120
+
+        Returns:
+            The command output (stdout and stderr combined), or an error message.
+        """
+        # Validate required parameter
+        if not cmd or not cmd.strip():
+            return "error: 'cmd' parameter is required. Please provide the shell command to execute. Example: bash(cmd='ls -la')"
         try:
             print(f"  {DIM}$ {cmd}{RESET}")
             proc = subprocess.Popen(
