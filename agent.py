@@ -4,19 +4,18 @@ import os
 import pathlib
 import re
 import subprocess
+import argparse
 from dotenv import load_dotenv
 
 from agno.agent import Agent
-from agno.team import Team
-from agno.db.sqlite import SqliteDb
+from agno.models.ollama import Ollama
 from agno.models.openrouter import OpenRouter
 from agno.tools.toolkit import Toolkit
 
 load_dotenv()
 
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-20250514")
-db = SqliteDb(db_file="tmp/agents.db")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
 BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = "\033[34m", "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m"
 
@@ -254,141 +253,6 @@ class BashToolkit(Toolkit):
 # AGENT INSTRUCTIONS
 # =============================================================================
 
-DOCUMENT_CREATOR_INSTRUCTIONS = """You create professional documents (PowerPoint, Word, Excel) using JavaScript libraries.
-
-## Workspace
-All work happens in the `test/` folder. Always check if `test/package.json` exists first.
-
-## Setup (if test/package.json doesn't exist)
-1. Create test/package.json:
-```json
-{
-  "name": "workspace",
-  "type": "commonjs",
-  "dependencies": {
-    "pptxgenjs": "^3.12.0",
-    "exceljs": "^4.4.0",
-    "docx": "^8.5.0"
-  }
-}
-```
-2. Run: `cd test && npm install`
-
-## PowerPoint (pptxgenjs)
-```javascript
-const pptxgen = require("pptxgenjs");
-const pptx = new pptxgen();
-pptx.layout = "LAYOUT_16x9";
-
-const slide = pptx.addSlide();
-slide.addText("Title", { x: 0.5, y: 0.5, w: 9, h: 1, fontSize: 32, bold: true, color: "1F4E78" });
-
-// Bar chart
-slide.addChart(pptx.ChartType.bar, [
-  { name: "Series", labels: ["A", "B"], values: [10, 20] }
-], { x: 0.5, y: 2, w: 6, h: 3, showValue: true });
-
-// Pie chart
-slide.addChart(pptx.ChartType.pie, [
-  { name: "Data", labels: ["X", "Y"], values: [60, 40] }
-], { x: 0.5, y: 2, w: 5, h: 4, showPercent: true });
-
-// KPI cards
-slide.addShape(pptx.ShapeType.rect, { x: 1, y: 2, w: 2, h: 1.5, fill: { color: "E8F2FF" } });
-slide.addText("$1.5M", { x: 1, y: 2.3, w: 2, h: 0.5, fontSize: 28, bold: true, align: "center" });
-
-pptx.writeFile({ fileName: "test/output.pptx" });
-```
-
-## Excel (exceljs)
-```javascript
-const ExcelJS = require("exceljs");
-const workbook = new ExcelJS.Workbook();
-const sheet = workbook.addWorksheet("Data");
-
-sheet.columns = [
-  { header: "Name", key: "name", width: 20 },
-  { header: "Value", key: "value", width: 15 }
-];
-sheet.addRow({ name: "Item A", value: 100 });
-
-// Formulas
-sheet.getCell("C1").value = { formula: "SUM(B:B)" };
-
-// Styling
-sheet.getRow(1).font = { bold: true };
-sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "4472C4" } };
-
-workbook.xlsx.writeFile("test/output.xlsx");
-```
-
-## Word (docx)
-```javascript
-const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, HeadingLevel } = require("docx");
-const fs = require("fs");
-
-const doc = new Document({
-  sections: [{
-    children: [
-      new Paragraph({ text: "Title", heading: HeadingLevel.HEADING_1 }),
-      new Paragraph({ children: [
-        new TextRun({ text: "Bold", bold: true }),
-        new TextRun(" normal text.")
-      ]})
-    ]
-  }]
-});
-
-Packer.toBuffer(doc).then(buffer => fs.writeFileSync("test/output.docx", buffer));
-```
-
-## Workflow
-1. Check if test/package.json exists, set up if needed
-2. Write script to test/
-3. Execute: `cd test && node script.js`
-4. Confirm output file was created
-"""
-
-DATA_ANALYST_INSTRUCTIONS = """You analyze data, read Excel/CSV files, and perform calculations using Python.
-
-## Capabilities
-- Read and analyze Excel files with pandas + openpyxl
-- Process CSV data
-- Perform statistical analysis
-- Generate insights and summaries
-
-## Workspace
-Work in the `test/` folder for any temporary files or outputs.
-
-## Excel Analysis
-```python
-import pandas as pd
-
-# Read Excel
-df = pd.read_excel("test/data.xlsx")
-print(df.head())
-print(df.describe())
-
-# Analysis
-total = df["column"].sum()
-avg = df["column"].mean()
-grouped = df.groupby("category").agg({"value": ["sum", "mean"]})
-```
-
-## CSV Analysis
-```python
-import pandas as pd
-df = pd.read_csv("test/data.csv")
-# Process as needed
-```
-
-## Workflow
-1. Read the data file
-2. Understand its structure
-3. Perform requested analysis
-4. Present clear insights with numbers
-"""
-
 CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, editing files and running commands.
 
 ## Capabilities
@@ -402,29 +266,6 @@ CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, 
 - Use glob to find files: `**/*.py`, `**/*.js`
 - Use grep to search content
 - Explain what you're doing
-"""
-
-TEAM_LEADER_INSTRUCTIONS = """You coordinate a team of specialized agents to help users with their tasks.
-
-## Your Team
-1. **Document Creator** - Creates PowerPoint, Word, Excel documents using JavaScript libraries
-2. **Data Analyst** - Analyzes Excel/CSV data using Python and pandas
-3. **Code Assistant** - Handles file operations, code editing, and shell commands
-
-## Delegation Guidelines
-- Document creation requests (presentations, spreadsheets, reports) → Document Creator
-- Data analysis, Excel reading, statistics → Data Analyst
-- File operations, code editing, searching → Code Assistant
-- Complex tasks may need multiple agents in sequence
-
-## Workspace
-All generated documents go in the `test/` folder.
-
-## Your Role
-- Understand what the user needs
-- Delegate to the appropriate agent(s)
-- Synthesize results into a clear response
-- If a task spans multiple domains, coordinate between agents
 """
 
 
@@ -444,54 +285,53 @@ def render_markdown(text):
     return re.sub(r"\*\*(.+?)\*\*", f"{BOLD}\\1{RESET}", text)
 
 
+def resolve_runtime_config():
+    parser = argparse.ArgumentParser(description="Run AGNO team with selectable LLM provider/model")
+    parser.add_argument("--provider", choices=["openrouter", "ollama"], help="LLM provider")
+    parser.add_argument("--model", help="Model id/name for selected provider")
+    parser.add_argument("--ollama-host", help="Ollama host URL, e.g. http://localhost:11434")
+    args = parser.parse_args()
+
+    provider = (args.provider or os.getenv("LLM_PROVIDER", "openrouter")).strip().lower()
+    model = args.model or os.getenv("MODEL")
+    if not model:
+        model = "anthropic/claude-sonnet-4.5" if provider == "openrouter" else "llama3.1"
+    ollama_host = args.ollama_host or OLLAMA_HOST
+    return provider, model, ollama_host
+
+
+def build_model(provider: str, model_id: str, ollama_host: str | None):
+    if provider == "openrouter":
+        return OpenRouter(id=model_id, api_key=OPENROUTER_KEY)
+    if provider == "ollama":
+        kwargs = {"id": model_id}
+        if ollama_host:
+            kwargs["host"] = ollama_host
+        return Ollama(**kwargs)
+    raise ValueError(f"Unsupported LLM_PROVIDER: {provider}. Use 'openrouter' or 'ollama'.")
+
+
 def main():
-    print(f"{BOLD}agnocode team{RESET} | {DIM}{MODEL} (OpenRouter) | {WORKING_DIR}{RESET}\n")
+    llm_provider, model_id, ollama_host = resolve_runtime_config()
+    print(
+        f"{BOLD}agnocode assistant{RESET} | {DIM}{model_id} ({llm_provider.title()}) | {WORKING_DIR}{RESET}\n"
+    )
 
     # Ensure workspace directory exists
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Shared model
-    model = OpenRouter(id=MODEL, api_key=OPENROUTER_KEY)
+    model = build_model(provider=llm_provider, model_id=model_id, ollama_host=ollama_host)
 
-    # Create specialized agents
-    document_creator = Agent(
-        name="Document Creator",
-        role="Creates professional PowerPoint, Word, and Excel documents using JavaScript libraries",
-        tools=[FileToolkit(), BashToolkit()],
-        instructions=DOCUMENT_CREATOR_INSTRUCTIONS,
-        markdown=True,
-    )
-
-    data_analyst = Agent(
-        name="Data Analyst",
-        role="Analyzes Excel/CSV data, performs calculations and statistical analysis using Python",
-        tools=[FileToolkit(), BashToolkit()],
-        instructions=DATA_ANALYST_INSTRUCTIONS,
-        markdown=True,
-    )
-
-    code_assistant = Agent(
+    assistant = Agent(
         name="Code Assistant",
         role="Handles file operations, code reading/writing/editing, and shell commands",
+        model=model,
         tools=[FileToolkit(), BashToolkit()],
         instructions=CODE_ASSISTANT_INSTRUCTIONS,
         markdown=True,
     )
-
-    # Create the team
-    team = Team(
-        name="Assistant Team",
-        members=[document_creator, data_analyst, code_assistant],
-        model=model,
-        instructions=TEAM_LEADER_INSTRUCTIONS,
-        markdown=True,
-        show_members_responses=True,
-        enable_agentic_memory=True,
-        num_history_sessions=10,
-        db=db,
-    )
-
-    print(f"{DIM}Team members: Document Creator, Data Analyst, Code Assistant{RESET}\n")
+    print(f"{DIM}Single-agent mode: Code Assistant{RESET}\n")
 
     while True:
         try:
@@ -503,11 +343,18 @@ def main():
             if user_input in ("/q", "exit"):
                 break
             if user_input == "/c":
-                team.clear_history()
+                assistant = Agent(
+                    name="Code Assistant",
+                    role="Handles file operations, code reading/writing/editing, and shell commands",
+                    model=model,
+                    tools=[FileToolkit(), BashToolkit()],
+                    instructions=CODE_ASSISTANT_INSTRUCTIONS,
+                    markdown=True,
+                )
                 print(f"{GREEN}* Cleared conversation{RESET}")
                 continue
 
-            response = team.run(user_input)
+            response = assistant.run(user_input)
 
             if response and response.content:
                 print(f"\n{CYAN}*{RESET} {render_markdown(response.content)}")
