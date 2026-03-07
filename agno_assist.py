@@ -4,15 +4,12 @@ import pathlib
 import re
 import subprocess
 
-from dotenv import load_dotenv
-
 from agno.agent import Agent
 from agno.db.postgres import PostgresDb
 from agno.models.ollama import Ollama
-from agno.models.openrouter import OpenRouter
 from agno.os import AgentOS
-from agno.os.interfaces.agui import AGUI
 from agno.tools.toolkit import Toolkit
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -278,22 +275,31 @@ CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, 
 # =============================================================================
 
 
-def build_model():
-    provider = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
-    model_id = os.getenv("MODEL")
-    ollama_host = os.getenv("OLLAMA_HOST")
+import httpx
 
-    if provider == "openrouter":
-        return OpenRouter(
-            id=model_id or "anthropic/claude-sonnet-4-5",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-        )
-    if provider == "ollama":
-        kwargs = {"id": model_id or "llama3.1"}
-        if ollama_host:
-            kwargs["host"] = ollama_host
-        return Ollama(**kwargs)
-    raise ValueError(f"Unsupported LLM_PROVIDER: {provider!r}")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+
+
+def get_ollama_models() -> list[dict]:
+    """Fetch locally available models from the Ollama API."""
+    base = OLLAMA_HOST or "http://localhost:11434"
+    try:
+        resp = httpx.get(f"{base}/api/tags", timeout=3)
+        resp.raise_for_status()
+        return [
+            {"id": m["name"], "provider": "ollama", "name": m["name"]}
+            for m in resp.json().get("models", [])
+        ]
+    except Exception:
+        return []
+
+
+def build_model(model_id: str = None):
+    model_id = model_id or os.getenv("MODEL", "llama3.1")
+    kwargs = {"id": model_id}
+    if OLLAMA_HOST:
+        kwargs["host"] = OLLAMA_HOST
+    return Ollama(**kwargs)
 
 
 # =============================================================================
@@ -316,11 +322,42 @@ assistant = Agent(
 agent_os = AgentOS(
     name="Code Assist",
     agents=[assistant],
-    interfaces=[AGUI(agent=assistant)],
     cors_allowed_origins=["http://localhost:3000"],
 )
 
 app = agent_os.get_app()
 
+
+# =============================================================================
+# CUSTOM ENDPOINTS - Model Switching
+# =============================================================================
+
+
+@app.get("/api/available-models", tags=["Models"])
+async def list_models():
+    """List available models and the currently active one."""
+    current = assistant.model
+    current_id = getattr(current, "id", str(current))
+    models = get_ollama_models()
+    return {
+        "models": models,
+        "current": current_id,
+    }
+
+
+@app.post("/api/switch-model", tags=["Models"])
+async def switch_model(body: dict):
+    """Switch the agent's model at runtime."""
+    model_id = body.get("model_id")
+    if not model_id:
+        return {"error": "model_id is required"}, 400
+    try:
+        new_model = build_model(model_id=model_id)
+        assistant.model = new_model
+        return {"status": "ok", "model": model_id}
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+
 if __name__ == "__main__":
-    agent_os.serve(app="agno_assist:app", reload=True)
+    agent_os.serve(app="agno_assist:app", port=7777, reload=True)
