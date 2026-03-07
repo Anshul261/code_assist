@@ -1,23 +1,29 @@
+import argparse
 import glob as globlib
-import json
 import os
 import pathlib
 import re
 import subprocess
-import argparse
-from dotenv import load_dotenv
 
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 from agno.models.openrouter import OpenRouter
 from agno.tools.toolkit import Toolkit
+from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST")
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
-BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = "\033[34m", "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m"
+BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = (
+    "\033[34m",
+    "\033[36m",
+    "\033[32m",
+    "\033[33m",
+    "\033[31m",
+    "\033[35m",
+)
 
 WORKING_DIR = pathlib.Path.cwd().resolve()
 WORKSPACE_DIR = WORKING_DIR / "test"
@@ -35,6 +41,7 @@ def safe_path(path: str) -> pathlib.Path:
 # =============================================================================
 # TOOLKITS - Specialized tools for each agent
 # =============================================================================
+
 
 class FileToolkit(Toolkit):
     """Tools for file operations - reading, writing, editing, searching"""
@@ -66,7 +73,9 @@ class FileToolkit(Toolkit):
             if limit is None:
                 limit = len(lines)
             selected = lines[offset : offset + limit]
-            return "".join(f"{offset + idx + 1:4}| {line}" for idx, line in enumerate(selected))
+            return "".join(
+                f"{offset + idx + 1:4}| {line}" for idx, line in enumerate(selected)
+            )
         except Exception as err:
             return f"error: {err}"
 
@@ -92,7 +101,9 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def edit(self, path: str = None, old: str = None, new: str = None, all: bool = False) -> str:
+    def edit(
+        self, path: str = None, old: str = None, new: str = None, all: bool = False
+    ) -> str:
         """Replace text in a file. The 'old' text must be unique in the file unless all=true.
 
         Args:
@@ -188,7 +199,9 @@ class FileToolkit(Toolkit):
                 except ValueError:
                     continue
                 try:
-                    for line_num, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                    for line_num, line in enumerate(
+                        fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+                    ):
                         if pattern.search(line):
                             hits.append(f"{filepath}:{line_num}:{line.rstrip()}")
                             if len(hits) >= 50:
@@ -273,6 +286,7 @@ CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, 
 # MAIN
 # =============================================================================
 
+
 def separator():
     try:
         width = os.get_terminal_size().columns
@@ -286,16 +300,26 @@ def render_markdown(text):
 
 
 def resolve_runtime_config():
-    parser = argparse.ArgumentParser(description="Run AGNO team with selectable LLM provider/model")
-    parser.add_argument("--provider", choices=["openrouter", "ollama"], help="LLM provider")
+    parser = argparse.ArgumentParser(
+        description="Run AGNO team with selectable LLM provider/model"
+    )
+    parser.add_argument(
+        "--provider", choices=["openrouter", "ollama"], help="LLM provider"
+    )
     parser.add_argument("--model", help="Model id/name for selected provider")
-    parser.add_argument("--ollama-host", help="Ollama host URL, e.g. http://localhost:11434")
+    parser.add_argument(
+        "--ollama-host", help="Ollama host URL, e.g. http://localhost:11434"
+    )
     args = parser.parse_args()
 
-    provider = (args.provider or os.getenv("LLM_PROVIDER", "openrouter")).strip().lower()
+    provider = (
+        (args.provider or os.getenv("LLM_PROVIDER", "openrouter")).strip().lower()
+    )
     model = args.model or os.getenv("MODEL")
     if not model:
-        model = "anthropic/claude-sonnet-4.5" if provider == "openrouter" else "llama3.1"
+        model = (
+            "anthropic/claude-sonnet-4.5" if provider == "openrouter" else "llama3.1"
+        )
     ollama_host = args.ollama_host or OLLAMA_HOST
     return provider, model, ollama_host
 
@@ -308,7 +332,9 @@ def build_model(provider: str, model_id: str, ollama_host: str | None):
         if ollama_host:
             kwargs["host"] = ollama_host
         return Ollama(**kwargs)
-    raise ValueError(f"Unsupported LLM_PROVIDER: {provider}. Use 'openrouter' or 'ollama'.")
+    raise ValueError(
+        f"Unsupported LLM_PROVIDER: {provider}. Use 'openrouter' or 'ollama'."
+    )
 
 
 def main():
@@ -321,7 +347,9 @@ def main():
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Shared model
-    model = build_model(provider=llm_provider, model_id=model_id, ollama_host=ollama_host)
+    model = build_model(
+        provider=llm_provider, model_id=model_id, ollama_host=ollama_host
+    )
 
     assistant = Agent(
         name="Code Assistant",
@@ -368,6 +396,7 @@ def main():
             break
         except Exception as err:
             import traceback
+
             print(f"{RED}* Error: {err}{RESET}")
             traceback.print_exc()
 

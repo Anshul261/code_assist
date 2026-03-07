@@ -5,10 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ag-ui-protocol>=0.1.13",
     "agno>=2.4.1",
     "dotenv>=0.9.9",
+    "fastapi>=0.115.0",
     "ollama>=0.6.1",
     "openai>=2.15.0",
+    "psycopg[binary]>=3.0",
     "psycopg2-binary>=2.9.11",
     "sqlalchemy>=2.0.46",
+    "uvicorn>=0.34.0",
+    "pyjwt>=2.11.0",
+    "httpx-sse>=0.4.3",
 ]
