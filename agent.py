@@ -6,14 +6,13 @@ import re
 import subprocess
 
 from agno.agent import Agent
+from agno.compression.manager import CompressionManager
 from agno.models.ollama import Ollama
-from agno.models.openrouter import OpenRouter
 from agno.tools.toolkit import Toolkit
 from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST")
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
 BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = (
@@ -46,11 +45,14 @@ def safe_path(path: str) -> pathlib.Path:
 class FileToolkit(Toolkit):
     """Tools for file operations - reading, writing, editing, searching"""
 
+class FileToolkit(Toolkit):
+    """Tools for file operations - reading, writing, editing, searching"""
+
     def __init__(self, **kwargs):
         tools = [self.read, self.write, self.edit, self.glob, self.grep]
         super().__init__(name="file_tools", tools=tools, **kwargs)
 
-    def read(self, path: str = None, offset: int = 0, limit: int = None) -> str:
+    def read(self, path: str | None = None, offset: int = 0, limit: int | None = None) -> str:
         """Read a file and return its contents with line numbers.
 
         Args:
@@ -79,7 +81,7 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def write(self, path: str = None, content: str = None) -> str:
+    def write(self, path: str | None = None, content: str | None = None) -> str:
         """Write content to a file, creating parent directories if needed.
 
         Args:
@@ -102,7 +104,7 @@ class FileToolkit(Toolkit):
             return f"error: {err}"
 
     def edit(
-        self, path: str = None, old: str = None, new: str = None, all: bool = False
+        self, path: str | None = None, old: str | None = None, new: str | None = None, all: bool = False
     ) -> str:
         """Replace text in a file. The 'old' text must be unique in the file unless all=true.
 
@@ -137,7 +139,7 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def glob(self, pat: str = None, path: str = ".") -> str:
+    def glob(self, pat: str | None = None, path: str = ".") -> str:
         """Find files matching a glob pattern, sorted by modification time (newest first).
 
         Args:
@@ -169,7 +171,7 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-    def grep(self, pat: str = None, path: str = ".") -> str:
+    def grep(self, pat: str | None = None, path: str = ".") -> str:
         """Search file contents for a regex pattern.
 
         Args:
@@ -214,7 +216,6 @@ class FileToolkit(Toolkit):
         except Exception as err:
             return f"error: {err}"
 
-
 class BashToolkit(Toolkit):
     """Tools for executing shell commands"""
 
@@ -222,7 +223,7 @@ class BashToolkit(Toolkit):
         tools = [self.bash]
         super().__init__(name="bash_tools", tools=tools, **kwargs)
 
-    def bash(self, cmd: str = None, timeout: int = 120) -> str:
+    def bash(self, cmd: str | None = None, timeout: int = 120) -> str:
         """Execute a shell command and return its output.
 
         Args:
@@ -301,46 +302,30 @@ def render_markdown(text):
 
 def resolve_runtime_config():
     parser = argparse.ArgumentParser(
-        description="Run AGNO team with selectable LLM provider/model"
+        description="Run AGNO agent with Ollama"
     )
-    parser.add_argument(
-        "--provider", choices=["openrouter", "ollama"], help="LLM provider"
-    )
-    parser.add_argument("--model", help="Model id/name for selected provider")
+    parser.add_argument("--model", help="Ollama model name (default: llama3.1)")
     parser.add_argument(
         "--ollama-host", help="Ollama host URL, e.g. http://localhost:11434"
     )
     args = parser.parse_args()
 
-    provider = (
-        (args.provider or os.getenv("LLM_PROVIDER", "openrouter")).strip().lower()
-    )
-    model = args.model or os.getenv("MODEL")
-    if not model:
-        model = (
-            "anthropic/claude-sonnet-4.5" if provider == "openrouter" else "llama3.1"
-        )
+    model = args.model or os.getenv("MODEL", "llama3.1")
     ollama_host = args.ollama_host or OLLAMA_HOST
-    return provider, model, ollama_host
+    return model, ollama_host
 
 
-def build_model(provider: str, model_id: str, ollama_host: str | None):
-    if provider == "openrouter":
-        return OpenRouter(id=model_id, api_key=OPENROUTER_KEY)
-    if provider == "ollama":
-        kwargs = {"id": model_id}
-        if ollama_host:
-            kwargs["host"] = ollama_host
-        return Ollama(**kwargs)
-    raise ValueError(
-        f"Unsupported LLM_PROVIDER: {provider}. Use 'openrouter' or 'ollama'."
-    )
+def build_model(model_id: str, ollama_host: str | None):
+    kwargs = {"id": model_id}
+    if ollama_host:
+        kwargs["host"] = ollama_host
+    return Ollama(**kwargs)
 
 
 def main():
-    llm_provider, model_id, ollama_host = resolve_runtime_config()
+    model_id, ollama_host = resolve_runtime_config()
     print(
-        f"{BOLD}agnocode assistant{RESET} | {DIM}{model_id} ({llm_provider.title()}) | {WORKING_DIR}{RESET}\n"
+        f"{BOLD}local code assistant{RESET} | {DIM}{model_id} (Ollama) | {WORKING_DIR}{RESET}\n"
     )
 
     # Ensure workspace directory exists
@@ -348,7 +333,14 @@ def main():
 
     # Shared model
     model = build_model(
-        provider=llm_provider, model_id=model_id, ollama_host=ollama_host
+        model_id=model_id, ollama_host=ollama_host
+    )
+
+    # Context compression manager
+    compression_manager = CompressionManager(
+        model=model,  # Use same model for compression
+        compress_tool_results=True,
+        compress_tool_results_limit=5,
     )
 
     assistant = Agent(
@@ -358,6 +350,11 @@ def main():
         tools=[FileToolkit(), BashToolkit()],
         instructions=CODE_ASSISTANT_INSTRUCTIONS,
         markdown=True,
+        compress_tool_results=True,
+        compression_manager=compression_manager,
+        add_history_to_context=True,
+        num_history_runs=10,
+        read_chat_history=True,
     )
     print(f"{DIM}Single-agent mode: Code Assistant{RESET}\n")
 
@@ -378,14 +375,20 @@ def main():
                     tools=[FileToolkit(), BashToolkit()],
                     instructions=CODE_ASSISTANT_INSTRUCTIONS,
                     markdown=True,
+                    compress_tool_results=True,
+                    compression_manager=compression_manager,
+                    add_history_to_context=True,
+                    num_history_runs=10,
+                    read_chat_history=True,
                 )
                 print(f"{GREEN}* Cleared conversation{RESET}")
                 continue
 
+            print(f"{DIM}Running agent...{RESET}")
             response = assistant.run(user_input)
-
+            print(f"{DIM}Response type: {type(response)}, content length: {len(response.content) if response and response.content else 0}{RESET}")
             if response and response.content:
-                print(f"\n{CYAN}*{RESET} {render_markdown(response.content)}")
+                print(render_markdown(response.content))
 
             print()
 
