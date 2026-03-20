@@ -13,7 +13,7 @@ const ChatHeader = () => {
   } = useStore()
 
   return (
-    <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+    <div className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface px-4">
       <div className="flex items-center gap-3">
         {/* Sidebar toggle (visible when collapsed) */}
         {sidebarCollapsed && (
@@ -30,7 +30,7 @@ const ChatHeader = () => {
       <div className="flex items-center gap-3">
         {/* Model name */}
         {selectedModel && (
-          <span className="font-mono text-xs text-muted">{selectedModel}</span>
+          <span className="rounded bg-accent px-2 py-0.5 font-mono text-xs text-primary">{selectedModel}</span>
         )}
 
         {/* Connection status dot */}

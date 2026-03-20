@@ -28,7 +28,7 @@ const ChatInput = () => {
   }
 
   return (
-    <div className="mx-auto w-full max-w-2xl border-t border-border">
+    <div className="w-full px-4">
       <TextArea
         placeholder="Message Assistant..."
         value={inputMessage}

@@ -11,6 +11,10 @@ interface MessageProps {
   message: ChatMessage
 }
 
+export const MessageLabel = ({ label }: { label: string }) => (
+  <p className="mb-2 text-xs font-medium uppercase tracking-widest text-muted">{label}</p>
+)
+
 const AgentMessage = ({ message }: MessageProps) => {
   const { streamingErrorMessage } = useStore()
   let messageContent
@@ -56,7 +60,8 @@ const AgentMessage = ({ message }: MessageProps) => {
   }
 
   return (
-    <div className="text-sm text-primary">
+    <div className="border-l-2 border-border pl-4 text-sm text-primary">
+      <MessageLabel label="Assistant" />
       {messageContent}
     </div>
   )
@@ -64,8 +69,11 @@ const AgentMessage = ({ message }: MessageProps) => {
 
 const UserMessage = memo(({ message }: MessageProps) => {
   return (
-    <div className="mt-4 text-sm text-primary">
-      {message.content}
+    <div className="flex flex-col items-end">
+      <MessageLabel label="You" />
+      <div className="max-w-[80%] rounded-xl bg-surface px-4 py-2.5 text-sm text-primary">
+        {message.content}
+      </div>
     </div>
   )
 })
