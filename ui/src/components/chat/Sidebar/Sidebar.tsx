@@ -12,7 +12,6 @@ const Sidebar = () => {
   const {
     sidebarCollapsed,
     setSidebarCollapsed,
-    setSettingsOpen,
     messages,
     selectedEndpoint,
     hydrated,
@@ -55,8 +54,7 @@ const Sidebar = () => {
         style={{ pointerEvents: sidebarCollapsed ? 'none' : 'auto' }}
       >
         {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
-          <span className="text-sm font-medium text-primary">Assistant</span>
+        <div className="mb-4 flex items-center justify-end">
           <button
             onClick={() => setSidebarCollapsed(true)}
             className="rounded p-1 text-muted transition-colors hover:text-primary"
@@ -81,15 +79,11 @@ const Sidebar = () => {
           {isMounted && isEndpointActive && <Sessions />}
         </div>
 
-        {/* Bottom: Settings */}
+        {/* Bottom: Chat count */}
         <div className="border-t border-border pt-3">
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-muted transition-colors hover:bg-hover hover:text-primary"
-          >
-            <Icon type="settings" size="xs" />
-            Settings
-          </button>
+          <span className="px-2 text-xs text-muted">
+            {sessionCount} {sessionCount === 1 ? 'chat' : 'chats'}
+          </span>
         </div>
       </motion.div>
 
@@ -127,14 +121,6 @@ const Sidebar = () => {
 
           {/* Spacer */}
           <div className="flex-1" />
-
-          {/* Settings */}
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="rounded p-1.5 text-muted transition-colors hover:text-primary"
-          >
-            <Icon type="settings" size="xs" />
-          </button>
         </motion.div>
       )}
     </motion.aside>
