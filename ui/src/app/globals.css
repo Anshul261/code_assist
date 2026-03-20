@@ -4,12 +4,11 @@
 
 @layer base {
   :root {
-    --color-border-default: 255, 255, 255, 0.2;
     --scrollbar-width: 0.1rem;
   }
 
   body {
-    @apply bg-background/80 text-secondary;
+    @apply bg-background text-primary;
   }
 }
 
@@ -18,11 +17,8 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  --tw-border-opacity: 1;
-  @apply bg-border;
-  border-color: rgba(255, 255, 255, var(--tw-border-opacity));
+  background-color: rgba(255, 255, 255, 0.1);
   border-radius: 9999px;
-  border-width: 1px;
 }
 
 ::-webkit-scrollbar-track {

@@ -1,4 +1,3 @@
-import Icon from '@/components/ui/icon'
 import MarkdownRenderer from '@/components/ui/typography/MarkdownRenderer'
 import { useStore } from '@/store'
 import type { ChatMessage } from '@/types/os'
@@ -17,13 +16,9 @@ const AgentMessage = ({ message }: MessageProps) => {
   let messageContent
   if (message.streamingError) {
     messageContent = (
-      <p className="text-destructive">
-        Oops! Something went wrong while streaming.{' '}
-        {streamingErrorMessage ? (
-          <>{streamingErrorMessage}</>
-        ) : (
-          'Please try refreshing the page or try again later.'
-        )}
+      <p className="text-sm text-destructive">
+        Something went wrong.{' '}
+        {streamingErrorMessage || 'Please try again.'}
       </p>
     )
   } else if (message.content) {
@@ -43,11 +38,7 @@ const AgentMessage = ({ message }: MessageProps) => {
     )
   } else if (message.response_audio) {
     if (!message.response_audio.transcript) {
-      messageContent = (
-        <div className="mt-2 flex items-start">
-          <AgentThinkingLoader />
-        </div>
-      )
+      messageContent = <AgentThinkingLoader />
     } else {
       messageContent = (
         <div className="flex w-full flex-col gap-4">
@@ -61,18 +52,11 @@ const AgentMessage = ({ message }: MessageProps) => {
       )
     }
   } else {
-    messageContent = (
-      <div className="mt-2">
-        <AgentThinkingLoader />
-      </div>
-    )
+    messageContent = <AgentThinkingLoader />
   }
 
   return (
-    <div className="flex flex-row items-start gap-4 font-geist">
-      <div className="flex-shrink-0">
-        <Icon type="agent" size="sm" />
-      </div>
+    <div className="text-sm text-primary">
       {messageContent}
     </div>
   )
@@ -80,13 +64,8 @@ const AgentMessage = ({ message }: MessageProps) => {
 
 const UserMessage = memo(({ message }: MessageProps) => {
   return (
-    <div className="flex items-start gap-4 pt-4 text-start max-md:break-words">
-      <div className="flex-shrink-0">
-        <Icon type="user" size="sm" />
-      </div>
-      <div className="text-md rounded-lg font-geist text-secondary">
-        {message.content}
-      </div>
+    <div className="mt-4 text-sm text-primary">
+      {message.content}
     </div>
   )
 })

@@ -1,232 +1,32 @@
 'use client'
 import { Button } from '@/components/ui/button'
-import { ModeSelector } from '@/components/chat/Sidebar/ModeSelector'
-import { EntitySelector } from '@/components/chat/Sidebar/EntitySelector'
 import useChatActions from '@/hooks/useChatActions'
 import { useStore } from '@/store'
-import { motion, AnimatePresence } from 'framer-motion'
-import { useState, useEffect } from 'react'
-import Icon from '@/components/ui/icon'
-import { getProviderIcon } from '@/lib/modelProvider'
-import ModelSelector from './ModelSelector'
-import Sessions from './Sessions'
-import AuthToken from './AuthToken'
-import { isValidUrl } from '@/lib/utils'
-import { toast } from 'sonner'
+import { motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
 import { useQueryState } from 'nuqs'
-import { truncateText } from '@/lib/utils'
-import { Skeleton } from '@/components/ui/skeleton'
+import Sessions from './Sessions'
+import Icon from '@/components/ui/icon'
 
-const ENDPOINT_PLACEHOLDER = 'NO ENDPOINT ADDED'
-const SidebarHeader = () => (
-  <div className="flex items-center gap-2">
-    <Icon type="agno" size="xs" />
-    <span className="text-xs font-medium uppercase text-white">Agent UI</span>
-  </div>
-)
-
-const NewChatButton = ({
-  disabled,
-  onClick
-}: {
-  disabled: boolean
-  onClick: () => void
-}) => (
-  <Button
-    onClick={onClick}
-    disabled={disabled}
-    size="lg"
-    className="h-9 w-full rounded-xl bg-primary text-xs font-medium text-background hover:bg-primary/80"
-  >
-    <Icon type="plus-icon" size="xs" className="text-background" />
-    <span className="uppercase">New Chat</span>
-  </Button>
-)
-
-const ModelDisplay = ({ model }: { model: string }) => (
-  <div className="flex h-9 w-full items-center gap-3 rounded-xl border border-primary/15 bg-accent p-3 text-xs font-medium uppercase text-muted">
-    {(() => {
-      const icon = getProviderIcon(model)
-      return icon ? <Icon type={icon} className="shrink-0" size="xs" /> : null
-    })()}
-    {model}
-  </div>
-)
-
-const Endpoint = () => {
+const Sidebar = () => {
   const {
-    selectedEndpoint,
-    isEndpointActive,
-    setSelectedEndpoint,
-    setAgents,
-    setSessionsData,
-    setMessages
-  } = useStore()
-  const { initialize } = useChatActions()
-  const [isEditing, setIsEditing] = useState(false)
-  const [endpointValue, setEndpointValue] = useState('')
-  const [isMounted, setIsMounted] = useState(false)
-  const [isHovering, setIsHovering] = useState(false)
-  const [isRotating, setIsRotating] = useState(false)
-  const [, setAgentId] = useQueryState('agent')
-  const [, setSessionId] = useQueryState('session')
-
-  useEffect(() => {
-    setEndpointValue(selectedEndpoint)
-    setIsMounted(true)
-  }, [selectedEndpoint])
-
-  const getStatusColor = (isActive: boolean) =>
-    isActive ? 'bg-positive' : 'bg-destructive'
-
-  const handleSave = async () => {
-    if (!isValidUrl(endpointValue)) {
-      toast.error('Please enter a valid URL')
-      return
-    }
-    const cleanEndpoint = endpointValue.replace(/\/$/, '').trim()
-    setSelectedEndpoint(cleanEndpoint)
-    setAgentId(null)
-    setSessionId(null)
-    setIsEditing(false)
-    setIsHovering(false)
-    setAgents([])
-    setSessionsData([])
-    setMessages([])
-  }
-
-  const handleCancel = () => {
-    setEndpointValue(selectedEndpoint)
-    setIsEditing(false)
-    setIsHovering(false)
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSave()
-    } else if (e.key === 'Escape') {
-      handleCancel()
-    }
-  }
-
-  const handleRefresh = async () => {
-    setIsRotating(true)
-    await initialize()
-    setTimeout(() => setIsRotating(false), 500)
-  }
-
-  return (
-    <div className="flex flex-col items-start gap-2">
-      <div className="text-xs font-medium uppercase text-primary">AgentOS</div>
-      {isEditing ? (
-        <div className="flex w-full items-center gap-1">
-          <input
-            type="text"
-            value={endpointValue}
-            onChange={(e) => setEndpointValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            className="flex h-9 w-full items-center text-ellipsis rounded-xl border border-primary/15 bg-accent p-3 text-xs font-medium text-muted"
-            autoFocus
-          />
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleSave}
-            className="hover:cursor-pointer hover:bg-transparent"
-          >
-            <Icon type="save" size="xs" />
-          </Button>
-        </div>
-      ) : (
-        <div className="flex w-full items-center gap-1">
-          <motion.div
-            className="relative flex h-9 w-full cursor-pointer items-center justify-between rounded-xl border border-primary/15 bg-accent p-3 uppercase"
-            onMouseEnter={() => setIsHovering(true)}
-            onMouseLeave={() => setIsHovering(false)}
-            onClick={() => setIsEditing(true)}
-            transition={{ type: 'spring', stiffness: 400, damping: 10 }}
-          >
-            <AnimatePresence mode="wait">
-              {isHovering ? (
-                <motion.div
-                  key="endpoint-display-hover"
-                  className="absolute inset-0 flex items-center justify-center"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                >
-                  <p className="flex items-center gap-2 whitespace-nowrap text-xs font-medium text-primary">
-                    <Icon type="edit" size="xxs" /> EDIT AGENTOS
-                  </p>
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="endpoint-display"
-                  className="absolute inset-0 flex items-center justify-between px-3"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                >
-                  <p className="text-xs font-medium text-muted">
-                    {isMounted
-                      ? truncateText(selectedEndpoint, 21) ||
-                        ENDPOINT_PLACEHOLDER
-                      : 'http://localhost:7777'}
-                  </p>
-                  <div
-                    className={`size-2 shrink-0 rounded-full ${getStatusColor(isEndpointActive)}`}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </motion.div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleRefresh}
-            className="hover:cursor-pointer hover:bg-transparent"
-          >
-            <motion.div
-              key={isRotating ? 'rotating' : 'idle'}
-              animate={{ rotate: isRotating ? 360 : 0 }}
-              transition={{ duration: 0.5, ease: 'easeInOut' }}
-            >
-              <Icon type="refresh" size="xs" />
-            </motion.div>
-          </Button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-const Sidebar = ({
-  hasEnvToken,
-  envToken
-}: {
-  hasEnvToken?: boolean
-  envToken?: string
-}) => {
-  const [isCollapsed, setIsCollapsed] = useState(false)
-  const { clearChat, focusChatInput, initialize } = useChatActions()
-  const {
+    sidebarCollapsed,
+    setSidebarCollapsed,
+    setSettingsOpen,
     messages,
     selectedEndpoint,
-    isEndpointActive,
-    selectedModel,
     hydrated,
-    isEndpointLoading,
-    mode
+    isEndpointActive,
+    mode,
+    sessionsData
   } = useStore()
+  const { clearChat, focusChatInput, initialize } = useChatActions()
   const [isMounted, setIsMounted] = useState(false)
   const [agentId] = useQueryState('agent')
   const [teamId] = useQueryState('team')
 
   useEffect(() => {
     setIsMounted(true)
-
     if (hydrated) initialize()
   }, [selectedEndpoint, initialize, hydrated, mode])
 
@@ -235,81 +35,108 @@ const Sidebar = ({
     focusChatInput()
   }
 
+  const sessionCount = sessionsData?.length ?? 0
+
   return (
     <motion.aside
-      className="relative flex h-screen shrink-0 grow-0 flex-col overflow-hidden px-2 py-3 font-dmmono"
-      initial={{ width: '16rem' }}
-      animate={{ width: isCollapsed ? '2.5rem' : '16rem' }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+      className="relative flex h-screen shrink-0 grow-0 flex-col overflow-hidden bg-surface"
+      initial={{ width: '17.5rem' }}
+      animate={{ width: sidebarCollapsed ? '4rem' : '17.5rem' }}
+      transition={{ type: 'spring', damping: 25, stiffness: 200 }}
     >
-      <motion.button
-        onClick={() => setIsCollapsed(!isCollapsed)}
-        className="absolute right-2 top-2 z-10 p-1"
-        aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        type="button"
-        whileTap={{ scale: 0.95 }}
-      >
-        <Icon
-          type="sheet"
-          size="xs"
-          className={`transform ${isCollapsed ? 'rotate-180' : 'rotate-0'}`}
-        />
-      </motion.button>
+      {/* Expanded content */}
       <motion.div
-        className="w-60 space-y-5"
-        initial={{ opacity: 0, x: -20 }}
-        animate={{ opacity: isCollapsed ? 0 : 1, x: isCollapsed ? -20 : 0 }}
-        transition={{ duration: 0.3, ease: 'easeInOut' }}
-        style={{
-          pointerEvents: isCollapsed ? 'none' : 'auto'
+        className="flex h-full flex-col px-3 py-3"
+        animate={{
+          opacity: sidebarCollapsed ? 0 : 1,
+          x: sidebarCollapsed ? -20 : 0
         }}
+        transition={{ duration: 0.2 }}
+        style={{ pointerEvents: sidebarCollapsed ? 'none' : 'auto' }}
       >
-        <SidebarHeader />
-        <NewChatButton
-          disabled={messages.length === 0}
+        {/* Header */}
+        <div className="mb-4 flex items-center justify-between">
+          <span className="text-sm font-medium text-primary">Assistant</span>
+          <button
+            onClick={() => setSidebarCollapsed(true)}
+            className="rounded p-1 text-muted transition-colors hover:text-primary"
+          >
+            <Icon type="sheet" size="xs" />
+          </button>
+        </div>
+
+        {/* New Chat */}
+        <Button
           onClick={handleNewChat}
-        />
-        {isMounted && (
-          <>
-            <Endpoint />
-            <AuthToken hasEnvToken={hasEnvToken} envToken={envToken} />
-            {isEndpointActive && (
-              <>
-                <motion.div
-                  className="flex w-full flex-col items-start gap-2"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.5, ease: 'easeInOut' }}
-                >
-                  <div className="text-xs font-medium uppercase text-primary">
-                    Mode
-                  </div>
-                  {isEndpointLoading ? (
-                    <div className="flex w-full flex-col gap-2">
-                      {Array.from({ length: 3 }).map((_, index) => (
-                        <Skeleton
-                          key={index}
-                          className="h-9 w-full rounded-xl"
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <>
-                      <ModeSelector />
-                      <EntitySelector />
-                      {selectedModel && (agentId || teamId) && (
-                        <ModelDisplay model={selectedModel} />
-                      )}
-                      <ModelSelector />
-                    </>
-                  )}
-                </motion.div>
-                <Sessions />
-              </>
-            )}
-          </>
-        )}
+          disabled={messages.length === 0}
+          size="lg"
+          className="mb-4 h-9 w-full rounded-lg border border-border bg-transparent text-xs font-medium text-primary hover:bg-hover"
+        >
+          <Icon type="plus-icon" size="xs" className="mr-1.5" />
+          New Chat
+        </Button>
+
+        {/* Sessions */}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {isMounted && isEndpointActive && <Sessions />}
+        </div>
+
+        {/* Bottom: Settings */}
+        <div className="border-t border-border pt-3">
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-muted transition-colors hover:bg-hover hover:text-primary"
+          >
+            <Icon type="settings" size="xs" />
+            Settings
+          </button>
+        </div>
       </motion.div>
+
+      {/* Collapsed content */}
+      {sidebarCollapsed && (
+        <motion.div
+          className="flex h-full flex-col items-center py-3"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.1, duration: 0.2 }}
+        >
+          {/* Expand toggle */}
+          <button
+            onClick={() => setSidebarCollapsed(false)}
+            className="mb-4 rounded p-1.5 text-muted transition-colors hover:text-primary"
+          >
+            <Icon type="sheet" size="xs" className="rotate-180" />
+          </button>
+
+          {/* New Chat */}
+          <button
+            onClick={handleNewChat}
+            disabled={messages.length === 0}
+            className="mb-4 rounded-lg p-2 text-muted transition-colors hover:bg-hover hover:text-primary disabled:opacity-30"
+          >
+            <Icon type="plus-icon" size="xs" />
+          </button>
+
+          {/* Session count badge */}
+          {sessionCount > 0 && (
+            <div className="mb-2 flex size-7 items-center justify-center rounded-full bg-hover text-xs text-muted">
+              {sessionCount}
+            </div>
+          )}
+
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Settings */}
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="rounded p-1.5 text-muted transition-colors hover:text-primary"
+          >
+            <Icon type="settings" size="xs" />
+          </button>
+        </motion.div>
+      )}
     </motion.aside>
   )
 }

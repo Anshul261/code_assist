@@ -4,10 +4,13 @@ import pathlib
 import re
 import subprocess
 
+import httpx
 from agno.agent import Agent
-from agno.db.postgres import PostgresDb
+from agno.compression.manager import CompressionManager
+from agno.db.sqlite import SqliteDb
 from agno.models.ollama import Ollama
 from agno.os import AgentOS
+from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.toolkit import Toolkit
 from dotenv import load_dotenv
 
@@ -18,6 +21,7 @@ os.chdir(pathlib.Path(__file__).parent)
 
 WORKING_DIR = pathlib.Path.cwd().resolve()
 WORKSPACE_DIR = WORKING_DIR / "test"
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 
 def safe_path(path: str) -> pathlib.Path:
@@ -27,6 +31,29 @@ def safe_path(path: str) -> pathlib.Path:
     except ValueError:
         raise ValueError(f"Path '{path}' is outside working directory")
     return resolved
+
+
+# =============================================================================
+# PROVIDER ABSTRACTION
+# =============================================================================
+
+PROVIDERS = {
+    "ollama": {
+        "name": "Ollama",
+        "status": "active",
+        "models_endpoint": "{host}/api/tags",
+    },
+    "vllm": {
+        "name": "vLLM",
+        "status": "coming_soon",
+        "models_endpoint": "{host}/v1/models",
+    },
+    "sglang": {
+        "name": "SGLang",
+        "status": "coming_soon",
+        "models_endpoint": "{host}/v1/models",
+    },
+}
 
 
 # =============================================================================
@@ -261,11 +288,13 @@ CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, 
 - Write new files or edit existing ones
 - Search files by name pattern (glob) or content (grep)
 - Run shell commands
+- Search the web for information using DuckDuckGo
 
 ## Best Practices
 - Always read a file before editing it
 - Use glob to find files: `**/*.py`, `**/*.js`
 - Use grep to search content
+- Use DuckDuckGo search when you need up-to-date information or answers from the web
 - Explain what you're doing
 """
 
@@ -275,14 +304,9 @@ CODE_ASSISTANT_INSTRUCTIONS = """You help with coding tasks - reading, writing, 
 # =============================================================================
 
 
-import httpx
-
-OLLAMA_HOST = os.getenv("OLLAMA_HOST")
-
-
-def get_ollama_models() -> list[dict]:
+def get_ollama_models(host: str = None) -> list[dict]:
     """Fetch locally available models from the Ollama API."""
-    base = OLLAMA_HOST or "http://localhost:11434"
+    base = host or OLLAMA_HOST
     try:
         resp = httpx.get(f"{base}/api/tags", timeout=3)
         resp.raise_for_status()
@@ -294,11 +318,12 @@ def get_ollama_models() -> list[dict]:
         return []
 
 
-def build_model(model_id: str = None):
-    model_id = model_id or os.getenv("MODEL", "llama3.1")
+def build_model(model_id: str = None, host: str = None):
+    model_id = model_id or os.getenv("MODEL", "qwen3.5:9b")
     kwargs = {"id": model_id}
-    if OLLAMA_HOST:
-        kwargs["host"] = OLLAMA_HOST
+    host = host or OLLAMA_HOST
+    if host:
+        kwargs["host"] = host
     return Ollama(**kwargs)
 
 
@@ -306,17 +331,37 @@ def build_model(model_id: str = None):
 # AGENT OS
 # =============================================================================
 
-db_url = os.getenv("DATABASE_URL", "postgresql+psycopg://ai:ai@localhost:5533/ai")
+DB_PATH = str(WORKING_DIR / "agent_os.db")
+
+db = SqliteDb(
+    db_file=DB_PATH,
+    session_table="agent_sessions",
+)
+
+model = build_model()
+
+compression_manager = CompressionManager(
+    model=model,
+    compress_tool_results=True,
+    compress_tool_results_limit=5,
+)
 
 assistant = Agent(
-    name="Code Assistant",
-    model=build_model(),
-    db=PostgresDb(db_url=db_url),
-    tools=[FileToolkit(), BashToolkit()],
+    name="Assistant",
+    model=model,
+    db=db,
+    tools=[
+        FileToolkit(),
+        BashToolkit(),
+        DuckDuckGoTools(enable_search=True, enable_news=True),
+    ],
     instructions=CODE_ASSISTANT_INSTRUCTIONS,
-    add_history_to_context=True,
-    num_history_runs=3,
     markdown=True,
+    compress_tool_results=True,
+    compression_manager=compression_manager,
+    add_history_to_context=True,
+    num_history_runs=10,
+    read_chat_history=True,
 )
 
 agent_os = AgentOS(
@@ -329,8 +374,28 @@ app = agent_os.get_app()
 
 
 # =============================================================================
-# CUSTOM ENDPOINTS - Model Switching
+# CUSTOM ENDPOINTS
 # =============================================================================
+
+
+@app.get("/api/providers", tags=["Providers"])
+async def list_providers():
+    """List available LLM providers and their status."""
+    return {"providers": PROVIDERS}
+
+
+@app.get("/api/providers/{provider}/models", tags=["Providers"])
+async def list_provider_models(provider: str):
+    """List models for a given provider."""
+    if provider not in PROVIDERS:
+        return {"error": f"Unknown provider: {provider}", "models": []}
+    info = PROVIDERS[provider]
+    if info["status"] != "active":
+        return {"error": f"{info['name']} is {info['status']}", "models": []}
+    if provider == "ollama":
+        models = get_ollama_models()
+        return {"models": models}
+    return {"models": []}
 
 
 @app.get("/api/available-models", tags=["Models"])
@@ -350,13 +415,14 @@ async def switch_model(body: dict):
     """Switch the agent's model at runtime."""
     model_id = body.get("model_id")
     if not model_id:
-        return {"error": "model_id is required"}, 400
+        return {"error": "model_id is required"}
     try:
         new_model = build_model(model_id=model_id)
         assistant.model = new_model
+        compression_manager.model = new_model
         return {"status": "ok", "model": model_id}
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

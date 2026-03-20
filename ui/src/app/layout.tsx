@@ -1,24 +1,24 @@
 import type { Metadata } from 'next'
-import { DM_Mono, Geist } from 'next/font/google'
+import { IBM_Plex_Sans, IBM_Plex_Mono } from 'next/font/google'
 import { NuqsAdapter } from 'nuqs/adapters/next/app'
 import { Toaster } from '@/components/ui/sonner'
 import './globals.css'
-const geistSans = Geist({
-  variable: '--font-geist-sans',
-  weight: '400',
-  subsets: ['latin']
+
+const ibmPlexSans = IBM_Plex_Sans({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-sans'
 })
 
-const dmMono = DM_Mono({
+const ibmPlexMono = IBM_Plex_Mono({
   subsets: ['latin'],
-  variable: '--font-dm-mono',
-  weight: '400'
+  weight: ['400'],
+  variable: '--font-mono'
 })
 
 export const metadata: Metadata = {
-  title: 'Agent UI',
-  description:
-    'A modern chat interface for AI agents built with Next.js, Tailwind CSS, and TypeScript. This template provides a ready-to-use UI for interacting with Agno agents.'
+  title: 'Code Assist',
+  description: 'A local-first AI coding assistant powered by Ollama'
 }
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${dmMono.variable} antialiased`}>
+      <body className={`${ibmPlexSans.variable} ${ibmPlexMono.variable} font-sans antialiased`}>
         <NuqsAdapter>{children}</NuqsAdapter>
         <Toaster />
       </body>

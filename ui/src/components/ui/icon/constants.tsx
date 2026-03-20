@@ -35,7 +35,9 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  Trash
+  Trash,
+  Settings,
+  Menu
 } from 'lucide-react'
 
 import { PlusIcon } from '@radix-ui/react-icons'
@@ -75,5 +77,7 @@ export const ICONS: IconTypeMap = {
   'chevron-up': ChevronUp,
   'plus-icon': PlusIcon,
   references: ReferencesIcon,
-  trash: Trash
+  trash: Trash,
+  settings: Settings,
+  menu: Menu
 }

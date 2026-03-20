@@ -11,23 +11,29 @@ export default {
   theme: {
     extend: {
       colors: {
-        primary: '#FAFAFA',
+        primary: '#FFFFFF',
         primaryAccent: '#18181B',
         brand: '#FF4017',
         background: {
-          DEFAULT: '#111113',
-          secondary: '#27272A'
+          DEFAULT: '#000000',
+          secondary: '#0A0A0A'
         },
+        surface: '#0A0A0A',
         secondary: '#f5f5f5',
-        border: 'rgba(var(--color-border-default))',
+        border: 'rgba(255,255,255,0.06)',
         accent: '#27272A',
-        muted: '#A1A1AA',
+        muted: '#6B6B6B',
         destructive: '#E53935',
-        positive: '#22C55E'
+        positive: '#22C55E',
+        hover: 'rgba(255,255,255,0.04)',
+        text: {
+          primary: '#FFFFFF',
+          secondary: '#6B6B6B'
+        }
       },
       fontFamily: {
-        geist: 'var(--font-geist-sans)',
-        dmmono: 'var(--font-dm-mono)'
+        sans: ['var(--font-sans)', 'IBM Plex Sans', 'sans-serif'],
+        mono: ['var(--font-mono)', 'IBM Plex Mono', 'monospace']
       },
       borderRadius: {
         xl: '10px'

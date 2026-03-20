@@ -54,6 +54,12 @@ interface Store {
   ) => void
   isSessionsLoading: boolean
   setIsSessionsLoading: (isSessionsLoading: boolean) => void
+  // Sidebar
+  sidebarCollapsed: boolean
+  setSidebarCollapsed: (collapsed: boolean) => void
+  // Settings
+  settingsOpen: boolean
+  setSettingsOpen: (open: boolean) => void
 }
 
 export const useStore = create<Store>()(
@@ -104,7 +110,12 @@ export const useStore = create<Store>()(
         })),
       isSessionsLoading: false,
       setIsSessionsLoading: (isSessionsLoading) =>
-        set(() => ({ isSessionsLoading }))
+        set(() => ({ isSessionsLoading })),
+      sidebarCollapsed: false,
+      setSidebarCollapsed: (collapsed) =>
+        set(() => ({ sidebarCollapsed: collapsed })),
+      settingsOpen: false,
+      setSettingsOpen: (open) => set(() => ({ settingsOpen: open }))
     }),
     {
       name: 'endpoint-storage',
