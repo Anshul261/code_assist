@@ -44,3 +44,5 @@ test/
 
 # Lock files (uv)
 # uv.lock is kept for reproducibility
+#
+output
