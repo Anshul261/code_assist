@@ -6,6 +6,7 @@ import Images from './Multimedia/Images'
 import Audios from './Multimedia/Audios'
 import { memo } from 'react'
 import AgentThinkingLoader from './AgentThinkingLoader'
+import ToolCalls from './ToolCalls'
 
 interface MessageProps {
   message: ChatMessage
@@ -28,6 +29,9 @@ const AgentMessage = ({ message }: MessageProps) => {
   } else if (message.content) {
     messageContent = (
       <div className="flex w-full flex-col gap-4">
+        {message.tool_calls && message.tool_calls.length > 0 && (
+          <ToolCalls toolCalls={message.tool_calls} />
+        )}
         <MarkdownRenderer>{message.content}</MarkdownRenderer>
         {message.videos && message.videos.length > 0 && (
           <Videos videos={message.videos} />
@@ -56,7 +60,14 @@ const AgentMessage = ({ message }: MessageProps) => {
       )
     }
   } else {
-    messageContent = <AgentThinkingLoader />
+    messageContent = (
+      <div className="flex flex-col gap-3">
+        {message.tool_calls && message.tool_calls.length > 0 && (
+          <ToolCalls toolCalls={message.tool_calls} />
+        )}
+        <AgentThinkingLoader />
+      </div>
+    )
   }
 
   return (

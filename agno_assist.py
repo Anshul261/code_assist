@@ -490,6 +490,8 @@ assistant = Agent(
     add_history_to_context=True,
     num_history_runs=10,
     read_chat_history=True,
+    debug_mode=True,
+    telemetry=False,
 )
 
 agent_os = AgentOS(
