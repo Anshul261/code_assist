@@ -12,6 +12,7 @@ export type IconType =
   | 'cohere'
   | 'ollama'
   | 'xai'
+  | 'openrouter'
   | 'agno'
   | 'user'
   | 'agent'

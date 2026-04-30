@@ -12,7 +12,8 @@ const PROVIDER_ICON_MAP: Record<string, IconType> = {
   deepseek: 'deepseek',
   cohere: 'cohere',
   ollama: 'ollama',
-  xai: 'xai'
+  xai: 'xai',
+  openrouter: 'openrouter'
 }
 
 export const getProviderIcon = (provider: string): IconType | null => {

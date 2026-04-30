@@ -5,12 +5,13 @@ import type { ToolCall } from '@/types/os'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-type Category = 'file' | 'bash' | 'search' | 'other'
+type Category = 'file' | 'bash' | 'search' | 'plan' | 'other'
 
 function getCategory(name: string): Category {
   if (['read', 'write', 'edit', 'glob', 'grep', 'ls'].includes(name)) return 'file'
   if (name === 'bash') return 'bash'
   if (name.startsWith('duckduckgo')) return 'search'
+  if (['create_plan', 'update_todo', 'mark_done'].includes(name)) return 'plan'
   return 'other'
 }
 
@@ -24,12 +25,16 @@ const LABEL: Record<string, string> = {
   bash: 'BASH',
   duckduckgo_search: 'SEARCH',
   duckduckgo_news: 'NEWS',
+  create_plan: 'PLAN',
+  update_todo: 'UPDATE TODO',
+  mark_done: 'DONE',
 }
 
 const DOT: Record<Category, string> = {
   file:   'bg-blue-400/70',
   bash:   'bg-amber-400/70',
   search: 'bg-emerald-400/70',
+  plan:   'bg-purple-400/70',
   other:  'bg-muted/40',
 }
 

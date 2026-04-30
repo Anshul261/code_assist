@@ -10,6 +10,7 @@ from agno.agent import Agent
 from agno.compression.manager import CompressionManager
 from agno.db.sqlite import SqliteDb
 from agno.models.ollama import Ollama
+from agno.models.openrouter import OpenRouter
 from agno.os import AgentOS
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.toolkit import Toolkit
@@ -141,6 +142,10 @@ PROVIDERS = {
         "name": "Ollama",
         "status": "active",
         "models_endpoint": "{host}/api/tags",
+    },
+    "openrouter": {
+        "name": "OpenRouter",
+        "status": "active",
     },
     "vllm": {
         "name": "vLLM",
@@ -410,32 +415,57 @@ class BashToolkit(Toolkit):
 # INSTRUCTIONS
 # =============================================================================
 
-CODE_ASSISTANT_INSTRUCTIONS = """You are a local AI assistant that can research topics, read knowledge files, and create documents.
+CODE_ASSISTANT_INSTRUCTIONS = """You are a helpful AI assistant.
 
-## Research workflow
-1. Use `duckduckgo_search` to find information online you can search as much as needed
-2. Use `glob` / `grep` to find relevant local files in the knowledge base
-3. Use `read` to load file content
-4. Synthesise and use `write` to save results to the output directory
+## How to handle every request — plan first, then act
 
-## File tools
-- `ls(path)` — list a directory
-- `glob(pat='**/*.md')` — find files by pattern
-- `grep(pat='keyword')` — search file contents
-- `read(path='file.md')` — read from knowledge dirs
-- `write(path='reports/summary.md', content='...')` — write to output dir
-- `edit(path, old, new)` — replace text in a file
+When the user asks you to do something, you MUST follow these steps in order:
 
-## Best practices
-- Use grep/glob before reading whole files — find the relevant parts first
-- Save research as markdown in the output dir for future reference
-- Include sources (URLs) in any reports you write
+1. **Write a plan as markdown** — at the START of your response, write a numbered plan showing what you will do. Format it clearly:
+   ```
+   ## Plan
+   1. Step one...
+   2. Step two...
+   3. Step three...
+   ```
+
+2. **Then execute** — immediately after writing the plan, call the appropriate tools to do the work. Do NOT ask the user for permission first.
+
+3. **Summarize** — when done, briefly say what was accomplished.
+
+## Tools
+- ls(path) — list files in a directory
+- glob(pat) — find files matching a pattern (e.g. "**/*.md")
+- grep(pat) — search file contents for a pattern
+- read(path) — read a file (supports offset and limit)
+- write(path, content) — write a file to the output directory
+- edit(path, old, new) — replace text in a file
+- bash(cmd) — run a shell command
+- duckduckgo_search(query) — search the web
+
+## Rules
+- Always show your plan before executing — the user expects to see it.
+- Be specific in your plan — name the exact files and tools you will use.
+- If the task is simple (e.g. "read this file"), still show a brief plan.
 """
 
 
 # =============================================================================
 # MODEL FACTORY
 # =============================================================================
+
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+OPENROUTER_POPULAR_MODELS = [
+    {"id": "qwen/qwen3.6-27b", "name": "Qwen 3.6 27B", "provider": "openrouter"},
+    {"id": "openai/gpt-oss-120b", "name": "Open AI OSS 120B", "provider": "openrouter"},
+    {"id": "z-ai/glm-5.1", "name": "GLM 5.1", "provider": "openrouter"},
+    {"id": "moonshotai/kimi-k2.6", "name": "Kimi K2.6", "provider": "openrouter"},
+    {"id": "deepseek/deepseek-v3", "name": "DeepSeek V3", "provider": "openrouter"},
+    {"id": "nvidia/nemotron-3-super-120b-a12b", "name": "Nemotron 120B", "provider": "openrouter"},
+]
 
 
 def get_ollama_models(host: str = None) -> list[dict]:
@@ -451,7 +481,30 @@ def get_ollama_models(host: str = None) -> list[dict]:
         return []
 
 
-def build_model(model_id: str = None, host: str = None):
+def get_openrouter_models() -> list[dict]:
+    if not OPENROUTER_API_KEY:
+        return []
+    try:
+        resp = httpx.get(
+            f"{OPENROUTER_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        return [
+            {"id": m["id"], "name": m.get("name", m["id"]), "provider": "openrouter"}
+            for m in data[:50]
+        ]
+    except Exception:
+        return OPENROUTER_POPULAR_MODELS
+
+
+def build_model(provider: str = "ollama", model_id: str = None, host: str = None):
+    if provider == "openrouter":
+        model_id = model_id or "openai/gpt-4o-mini"
+        return OpenRouter(id=model_id)
+
     model_id = model_id or os.getenv("MODEL", "qwen3.5:9b")
     kwargs = {"id": model_id}
     host = host or OLLAMA_HOST
@@ -464,10 +517,13 @@ def build_model(model_id: str = None, host: str = None):
 # AGENT OS
 # =============================================================================
 
+DEFAULT_PROVIDER = os.getenv("PROVIDER", "ollama")
+current_provider = DEFAULT_PROVIDER
+
 DB_PATH = str(WORKING_DIR / "agent_os.db")
 
 db = SqliteDb(db_file=DB_PATH, session_table="agent_sessions")
-model = build_model()
+model = build_model(provider=current_provider)
 compression_manager = CompressionManager(
     model=model,
     compress_tool_results=True,
@@ -522,25 +578,34 @@ async def list_provider_models(provider: str):
         return {"error": f"{info['name']} is {info['status']}", "models": []}
     if provider == "ollama":
         return {"models": get_ollama_models()}
+    if provider == "openrouter":
+        return {"models": get_openrouter_models()}
     return {"models": []}
 
 
 @app.get("/api/available-models", tags=["Models"])
 async def list_models():
     current_id = getattr(assistant.model, "id", str(assistant.model))
-    return {"models": get_ollama_models(), "current": current_id}
+    if current_provider == "openrouter":
+        return {"models": get_openrouter_models(), "current": current_id, "provider": current_provider}
+    return {"models": get_ollama_models(), "current": current_id, "provider": current_provider}
 
 
 @app.post("/api/switch-model", tags=["Models"])
 async def switch_model(body: dict):
+    global current_provider
     model_id = body.get("model_id")
+    provider = body.get("provider", "ollama")
     if not model_id:
         return {"error": "model_id is required"}
+    if provider not in PROVIDERS:
+        return {"error": f"Unknown provider: {provider}"}
     try:
-        new_model = build_model(model_id=model_id)
+        current_provider = provider
+        new_model = build_model(provider=provider, model_id=model_id)
         assistant.model = new_model
         compression_manager.model = new_model
-        return {"status": "ok", "model": model_id}
+        return {"status": "ok", "model": model_id, "provider": provider}
     except Exception as e:
         return {"error": str(e)}
 

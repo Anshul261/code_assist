@@ -18,6 +18,7 @@ interface WorkspaceConfig {
 
 const PROVIDERS = [
   { id: 'ollama', name: 'Ollama', status: 'active' },
+  { id: 'openrouter', name: 'OpenRouter', status: 'active' },
   { id: 'vllm', name: 'vLLM', status: 'coming_soon' },
   { id: 'sglang', name: 'SGLang', status: 'coming_soon' }
 ]
@@ -52,7 +53,7 @@ const Settings = () => {
 
   // Fetch models when model tab is open
   useEffect(() => {
-    if (settingsOpen && tab === 'model' && provider === 'ollama') {
+    if (settingsOpen && tab === 'model' && (provider === 'ollama' || provider === 'openrouter')) {
       fetchModels()
     }
   }, [settingsOpen, tab, provider])
@@ -72,11 +73,13 @@ const Settings = () => {
   const fetchModels = async () => {
     setIsLoadingModels(true)
     try {
-      const resp = await fetch(`${endpoint}/api/available-models`)
+      const resp = await fetch(`${endpoint}/api/providers/${provider}/models`)
       if (resp.ok) {
         const data = await resp.json()
         setModels(data.models || [])
-        if (data.current) setModel(data.current)
+        if (data.models?.length > 0 && !model) {
+          setModel(data.models[0].id)
+        }
       }
     } catch {
       setModels([])
@@ -105,16 +108,16 @@ const Settings = () => {
     localStorage.setItem('settings_host', host)
     localStorage.setItem('settings_provider', provider)
 
-    if (model && model !== selectedModel) {
+    if (model) {
       try {
         const resp = await fetch(`${endpoint}/api/switch-model`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model_id: model })
+          body: JSON.stringify({ model_id: model, provider })
         })
         if (resp.ok) {
           setSelectedModel(model)
-          toast.success(`Model switched to ${model}`)
+          toast.success(`Model switched to ${model} (${provider})`)
         } else {
           toast.error('Failed to switch model')
         }
