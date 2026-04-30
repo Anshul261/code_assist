@@ -15,12 +15,14 @@ import { constructEndpointUrl } from '@/lib/constructEndpointUrl'
 interface AvailableModel {
   id: string
   name: string
+  provider?: string
 }
 
 const ModelSelector = () => {
   const { selectedEndpoint, setSelectedModel } = useStore()
   const [models, setModels] = useState<AvailableModel[]>([])
   const [currentModelId, setCurrentModelId] = useState<string>('')
+  const [currentProvider, setCurrentProvider] = useState<string>('ollama')
 
   const fetchModels = useCallback(async () => {
     try {
@@ -30,6 +32,7 @@ const ModelSelector = () => {
       const data = await res.json()
       setModels(data.models || [])
       setCurrentModelId(data.current || '')
+      setCurrentProvider(data.provider || 'ollama')
     } catch {
       // silently fail — models endpoint may not exist
     }
@@ -48,15 +51,21 @@ const ModelSelector = () => {
       const res = await fetch(`${url}/api/switch-model`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: model.id })
+        body: JSON.stringify({ model_id: model.id, provider: model.provider || currentProvider })
       })
       if (!res.ok) {
         toast.error('Failed to switch model')
         return
       }
+      const data = await res.json()
+      if (data.error) {
+        toast.error(data.error)
+        return
+      }
       setCurrentModelId(model.id)
-      setSelectedModel(model.name)
-      toast.success(`Switched to ${model.name}`)
+      setCurrentProvider(data.provider || currentProvider)
+      setSelectedModel(model.name || model.id)
+      toast.success(`Switched to ${model.name || model.id} (${data.provider || currentProvider})`)
     } catch {
       toast.error('Failed to switch model')
     }

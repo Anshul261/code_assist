@@ -1,5 +1,4 @@
 'use client'
-
 import { useEffect, useState } from 'react'
 import { useStore } from '@/store'
 import { toast } from 'sonner'
@@ -14,6 +13,13 @@ interface ModelInfo {
 interface WorkspaceConfig {
   knowledge_dirs: string[]
   output_dir: string
+}
+
+interface ProviderConfig {
+  provider: string
+  model: string
+  openrouter_api_key_set: boolean
+  ollama_host: string
 }
 
 const PROVIDERS = [
@@ -37,6 +43,11 @@ const Settings = () => {
   const [model, setModel] = useState('')
   const [isLoadingModels, setIsLoadingModels] = useState(false)
 
+  // OpenRouter API key
+  const [openrouterApiKey, setOpenrouterApiKey] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [apiKeySet, setApiKeySet] = useState(false)
+
   // Workspace tab state
   const [workspace, setWorkspace] = useState<WorkspaceConfig>({ knowledge_dirs: [], output_dir: '' })
   const [newKnowledgeDir, setNewKnowledgeDir] = useState('')
@@ -45,11 +56,23 @@ const Settings = () => {
 
   const endpoint = selectedEndpoint || 'http://localhost:7777'
 
-  // Init from localStorage
+  // Init from localStorage and server
   useEffect(() => {
     setHost(localStorage.getItem('settings_host') || 'http://localhost:11434')
     setProvider(localStorage.getItem('settings_provider') || 'ollama')
-  }, [])
+
+    // Fetch current provider config from server
+    fetch(`${endpoint}/api/provider-config`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: ProviderConfig | null) => {
+        if (data) {
+          setProvider(data.provider)
+          setApiKeySet(data.openrouter_api_key_set)
+          if (data.ollama_host) setHost(data.ollama_host)
+        }
+      })
+      .catch(() => {})
+  }, [endpoint])
 
   // Fetch models when model tab is open
   useEffect(() => {
@@ -76,9 +99,13 @@ const Settings = () => {
       const resp = await fetch(`${endpoint}/api/providers/${provider}/models`)
       if (resp.ok) {
         const data = await resp.json()
-        setModels(data.models || [])
-        if (data.models?.length > 0 && !model) {
-          setModel(data.models[0].id)
+        const modelList = (data.models || []).map((m: ModelInfo) => ({
+          ...m,
+          provider: m.provider || provider
+        }))
+        setModels(modelList)
+        if (modelList.length > 0 && !model) {
+          setModel(modelList[0].id)
         }
       }
     } catch {
@@ -104,6 +131,34 @@ const Settings = () => {
     }
   }
 
+  const handleSaveApiKey = async () => {
+    if (!openrouterApiKey.trim()) return
+    try {
+      const resp = await fetch(`${endpoint}/api/provider-config/api-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'openrouter', api_key: openrouterApiKey.trim() })
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        if (data.error) {
+          toast.error(data.error)
+          return
+        }
+        setApiKeySet(true)
+        setOpenrouterApiKey('')
+        setShowApiKey(false)
+        toast.success('OpenRouter API key saved')
+        // Refresh models now that key is set
+        fetchModels()
+      } else {
+        toast.error('Failed to save API key')
+      }
+    } catch {
+      toast.error('Failed to connect to server')
+    }
+  }
+
   const handleSaveModel = async () => {
     localStorage.setItem('settings_host', host)
     localStorage.setItem('settings_provider', provider)
@@ -116,6 +171,11 @@ const Settings = () => {
           body: JSON.stringify({ model_id: model, provider })
         })
         if (resp.ok) {
+          const data = await resp.json()
+          if (data.error) {
+            toast.error(data.error)
+            return
+          }
           setSelectedModel(model)
           toast.success(`Model switched to ${model} (${provider})`)
         } else {
@@ -241,6 +301,45 @@ const Settings = () => {
               </select>
             </div>
 
+            {provider === 'openrouter' && (
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted">
+                  OpenRouter API Key
+                </label>
+                {apiKeySet && !showApiKey ? (
+                  <div className="flex items-center gap-2">
+                    <span className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted">
+                      •••••••• (key configured)
+                    </span>
+                    <button
+                      onClick={() => setShowApiKey(true)}
+                      className="h-9 rounded-lg border border-border bg-background px-3 text-xs text-muted transition-colors hover:text-primary"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={openrouterApiKey}
+                      onChange={(e) => setOpenrouterApiKey(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveApiKey()}
+                      placeholder="sk-or-..."
+                      className="h-9 flex-1 rounded-lg border border-border bg-background px-3 font-mono text-xs text-primary outline-none placeholder:text-muted/40"
+                    />
+                    <button
+                      onClick={handleSaveApiKey}
+                      disabled={!openrouterApiKey.trim()}
+                      className="h-9 rounded-lg border border-border bg-background px-3 text-xs text-muted transition-colors hover:text-primary disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div>
               <label className="mb-1.5 block text-xs font-medium text-muted">Model</label>
               <select
@@ -252,7 +351,7 @@ const Settings = () => {
                 {isLoadingModels ? (
                   <option>Loading...</option>
                 ) : models.length === 0 ? (
-                  <option>No models found</option>
+                  <option>No models found{provider === 'openrouter' && !apiKeySet ? ' — set API key first' : ''}</option>
                 ) : (
                   models.map((m) => (
                     <option key={m.id} value={m.id}>{m.name}</option>
@@ -261,16 +360,18 @@ const Settings = () => {
               </select>
             </div>
 
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-muted">Host</label>
-              <input
-                type="text"
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm text-primary outline-none"
-                placeholder="http://localhost:11434"
-              />
-            </div>
+            {provider === 'ollama' && (
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-muted">Host</label>
+                <input
+                  type="text"
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm text-primary outline-none"
+                  placeholder="http://localhost:11434"
+                />
+              </div>
+            )}
 
             <button
               onClick={handleSaveModel}

@@ -10,7 +10,12 @@ from agno.agent import Agent
 from agno.compression.manager import CompressionManager
 from agno.db.sqlite import SqliteDb
 from agno.models.ollama import Ollama
-from agno.models.openrouter import OpenRouter
+
+
+def _get_openrouter():
+    """Lazy import to avoid requiring openai when only using Ollama."""
+    from agno.models.openrouter import OpenRouter
+    return OpenRouter
 from agno.os import AgentOS
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.toolkit import Toolkit
@@ -500,10 +505,14 @@ def get_openrouter_models() -> list[dict]:
         return OPENROUTER_POPULAR_MODELS
 
 
-def build_model(provider: str = "ollama", model_id: str = None, host: str = None):
+def build_model(provider: str = "ollama", model_id: str = None, host: str = None, api_key: str = None):
     if provider == "openrouter":
         model_id = model_id or "openai/gpt-4o-mini"
-        return OpenRouter(id=model_id)
+        kwargs = {"id": model_id}
+        key = api_key or OPENROUTER_API_KEY
+        if key:
+            kwargs["api_key"] = key
+        return _get_openrouter()(**kwargs)
 
     model_id = model_id or os.getenv("MODEL", "qwen3.5:9b")
     kwargs = {"id": model_id}
@@ -581,6 +590,35 @@ async def list_provider_models(provider: str):
     if provider == "openrouter":
         return {"models": get_openrouter_models()}
     return {"models": []}
+
+
+@app.get("/api/provider-config", tags=["Providers"])
+async def get_provider_config():
+    """Return current provider, model, and whether API keys are configured."""
+    current_id = getattr(assistant.model, "id", str(assistant.model))
+    return {
+        "provider": current_provider,
+        "model": current_id,
+        "openrouter_api_key_set": bool(OPENROUTER_API_KEY),
+        "ollama_host": OLLAMA_HOST,
+    }
+
+
+@app.post("/api/provider-config/api-key", tags=["Providers"])
+async def update_api_key(body: dict):
+    """Update the API key for a provider (currently only OpenRouter)."""
+    global OPENROUTER_API_KEY
+    provider = body.get("provider", "")
+    api_key = body.get("api_key", "").strip()
+    if provider == "openrouter":
+        OPENROUTER_API_KEY = api_key
+        # If currently using OpenRouter, rebuild the model with the new key
+        if current_provider == "openrouter":
+            new_model = build_model(provider="openrouter", model_id=getattr(assistant.model, "id", None))
+            assistant.model = new_model
+            compression_manager.model = new_model
+        return {"status": "ok", "provider": provider, "api_key_set": bool(api_key)}
+    return {"error": f"Unknown provider: {provider}"}
 
 
 @app.get("/api/available-models", tags=["Models"])
