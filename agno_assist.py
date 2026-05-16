@@ -6,10 +6,14 @@ import subprocess
 from dataclasses import dataclass, field
 
 import httpx
+from fastapi import Response
+from fastapi.responses import FileResponse
 from agno.agent import Agent
 from agno.compression.manager import CompressionManager
 from agno.db.sqlite import SqliteDb
 from agno.models.ollama import Ollama
+from agno.skills import LocalSkills, Skills
+from agno.team import Team, TeamMode
 
 
 def _get_openrouter():
@@ -21,6 +25,8 @@ from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.toolkit import Toolkit
 from dotenv import load_dotenv
 
+from tools.visualization_tools import VisualizationTools
+
 load_dotenv()
 
 # Anchor cwd to the script's directory so paths are stable regardless of launch dir
@@ -28,6 +34,8 @@ os.chdir(pathlib.Path(__file__).parent)
 
 WORKING_DIR = pathlib.Path.cwd().resolve()
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://localhost:7777")
+SKILLS_DIR = WORKING_DIR / "skills"
 
 
 # =============================================================================
@@ -416,17 +424,190 @@ class BashToolkit(Toolkit):
             return f"error: {err}"
 
 
+class WorkProductToolkit(Toolkit):
+    """Higher-level tools for common work products."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="work_product_tools",
+            tools=[self.create_excel_analysis_ppt, self.create_ppt_from_markdown],
+            **kwargs,
+        )
+
+    def create_ppt_from_markdown(
+        self,
+        markdown_content: str,
+        output_name: str = "presentation",
+    ) -> str:
+        """Create a PPTX deck from markdown slide content.
+
+        Use this when the assistant already has a slide outline or can create one from research notes.
+        The first markdown H1 becomes the deck title; each H2 becomes a slide.
+
+        Args:
+            markdown_content: Slide markdown. Use one H1 title and H2 headings for slides.
+            output_name: Base filename for generated scratch markdown and deck, without extension.
+
+        Returns:
+            JSON string with the scratch outline path, deck path, slide count, and status.
+        """
+        try:
+            import json
+
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", output_name).strip("-").lower()
+            if not safe_name:
+                safe_name = "presentation"
+
+            outline_path = _resolve_write(f"scratch/{safe_name}-slide-outline.md")
+            deck_path = _resolve_write(f"decks/{safe_name}.pptx")
+            outline_path.parent.mkdir(parents=True, exist_ok=True)
+            deck_path.parent.mkdir(parents=True, exist_ok=True)
+            outline_path.write_text(markdown_content.rstrip() + "\n", encoding="utf-8")
+
+            ppt_cmd = [
+                "node",
+                str(WORKING_DIR / "skills" / "ppt" / "scripts" / "create_pptx.js"),
+                "--spec",
+                str(outline_path),
+                "--output",
+                str(deck_path),
+            ]
+            ppt_proc = subprocess.run(
+                ppt_cmd,
+                cwd=WORKING_DIR,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=180,
+            )
+            if ppt_proc.returncode != 0:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "step": "create_pptx",
+                        "outline": str(outline_path),
+                        "output": ppt_proc.stdout[-4000:],
+                    }
+                )
+            deck_result = json.loads(ppt_proc.stdout)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "outline": str(outline_path),
+                    "deck": deck_result["output"],
+                    "slides": deck_result["slides"],
+                },
+                indent=2,
+            )
+        except Exception as err:
+            return json.dumps({"status": "error", "error": str(err)})
+
+    def create_excel_analysis_ppt(
+        self,
+        workbook_path: str,
+        output_name: str = "excel-analysis",
+    ) -> str:
+        """Analyze an Excel workbook and create scratch notes, a report, chart PNGs, and a PPTX deck.
+
+        Args:
+            workbook_path: Path to the Excel workbook to analyze.
+            output_name: Base filename for the final deck, without extension.
+
+        Returns:
+            JSON string with generated artifact paths, or an error.
+        """
+        try:
+            import json
+
+            workbook = _resolve_read(workbook_path)
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", output_name).strip("-").lower()
+            if not safe_name:
+                safe_name = "excel-analysis"
+
+            profile_cmd = [
+                str(WORKING_DIR / ".venv" / "bin" / "python"),
+                str(WORKING_DIR / "skills" / "excel" / "scripts" / "profile_excel.py"),
+                str(workbook),
+                "--output-dir",
+                str(workspace.output_dir),
+            ]
+            profile_proc = subprocess.run(
+                profile_cmd,
+                cwd=WORKING_DIR,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=180,
+            )
+            if profile_proc.returncode != 0:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "step": "profile_excel",
+                        "output": profile_proc.stdout[-4000:],
+                    }
+                )
+            profile_result = json.loads(profile_proc.stdout)
+            report_md = pathlib.Path(profile_result["report_md"])
+            deck_path = _resolve_write(f"decks/{safe_name}.pptx")
+            deck_path.parent.mkdir(parents=True, exist_ok=True)
+
+            ppt_cmd = [
+                "node",
+                str(WORKING_DIR / "skills" / "ppt" / "scripts" / "create_pptx.js"),
+                "--spec",
+                str(report_md),
+                "--output",
+                str(deck_path),
+            ]
+            ppt_proc = subprocess.run(
+                ppt_cmd,
+                cwd=WORKING_DIR,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=180,
+            )
+            if ppt_proc.returncode != 0:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "step": "create_pptx",
+                        "output": ppt_proc.stdout[-4000:],
+                        "profile": profile_result,
+                    }
+                )
+            deck_result = json.loads(ppt_proc.stdout)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "workbook": str(workbook),
+                    "profile_md": profile_result["profile_md"],
+                    "profile_json": profile_result["profile_json"],
+                    "report_md": profile_result["report_md"],
+                    "charts": profile_result["charts"],
+                    "deck": deck_result["output"],
+                    "slides": deck_result["slides"],
+                },
+                indent=2,
+            )
+        except Exception as err:
+            return json.dumps({"status": "error", "error": str(err)})
+
+
 # =============================================================================
 # INSTRUCTIONS
 # =============================================================================
 
 CODE_ASSISTANT_INSTRUCTIONS = """You are a helpful AI assistant.
 
-## How to handle every request — plan first, then act
+## How to handle every request — work until done
 
 When the user asks you to do something, you MUST follow these steps in order:
 
-1. **Write a plan as markdown** — at the START of your response, write a numbered plan showing what you will do. Format it clearly:
+1. **Briefly plan, then immediately act** — for non-trivial work, start with a short plan and then call the needed tools in the same run.
+   A response that only says "I will do X" or "Let me do X" without calling tools is a failed response.
+   Format the plan clearly:
    ```
    ## Plan
    1. Step one...
@@ -436,7 +617,17 @@ When the user asks you to do something, you MUST follow these steps in order:
 
 2. **Then execute** — immediately after writing the plan, call the appropriate tools to do the work. Do NOT ask the user for permission first.
 
-3. **Summarize** — when done, briefly say what was accomplished.
+3. **Self-check before stopping** — before the final answer, verify that every requested deliverable exists or was actually completed. If not, keep using tools.
+
+4. **Summarize** — when done, briefly say what was accomplished and include artifact paths when files were created.
+
+## Completion rules
+- Do not stop after planning.
+- Do not stop after saying "I will write", "I will search", "let me continue", or "let me create".
+- If the task asks for research, reports, PPTs, files, charts, or code changes, you must use tools and continue until the requested artifact or result exists.
+- If a tool fails, try a narrower query, another available tool, or create a scratch note explaining the failure and continue with the best available evidence.
+- For long tasks, write intermediate notes to `scratch/*.md` so work survives context limits.
+- Final answers must include concrete results, not just intentions.
 
 ## Tools
 - ls(path) — list files in a directory
@@ -447,11 +638,20 @@ When the user asks you to do something, you MUST follow these steps in order:
 - edit(path, old, new) — replace text in a file
 - bash(cmd) — run a shell command
 - duckduckgo_search(query) — search the web
+- visualization tools — create chart PNGs and save chart images
+- skill tools — load specialized Excel and PPT instructions/scripts when a task matches a skill
+- create_excel_analysis_ppt(workbook_path, output_name) — one-call Excel analysis to report/charts/PPT
+- create_ppt_from_markdown(markdown_content, output_name) — one-call markdown outline to PPTX
 
 ## Rules
 - Always show your plan before executing — the user expects to see it.
 - Be specific in your plan — name the exact files and tools you will use.
 - If the task is simple (e.g. "read this file"), still show a brief plan.
+- For Excel, data analysis, charts, reports, and presentation work, load and follow the relevant skill.
+- Persist work artifacts under the output directory: scratch/*.md for notes and plans, reports/*.md for final reports, assets/*.png for charts/images, and decks/*.pptx for presentations.
+- Do not build a final PPT directly from raw data. Create a scratch outline or report first, generate assets, then create and verify the deck.
+- If the user asks to analyze an Excel file and create a PowerPoint, prefer create_excel_analysis_ppt unless the user asks for custom manual analysis steps.
+- If the user asks to turn research or notes into a PPT, create a slide outline and then prefer create_ppt_from_markdown so the deck is generated in the same run.
 """
 
 
@@ -464,6 +664,8 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 OPENROUTER_POPULAR_MODELS = [
+    {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "provider": "openrouter"},
+    {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "provider": "openrouter"},
     {"id": "qwen/qwen3.6-27b", "name": "Qwen 3.6 27B", "provider": "openrouter"},
     {"id": "openai/gpt-oss-120b", "name": "Open AI OSS 120B", "provider": "openrouter"},
     {"id": "z-ai/glm-5.1", "name": "GLM 5.1", "provider": "openrouter"},
@@ -535,9 +737,15 @@ db = SqliteDb(db_file=DB_PATH, session_table="agent_sessions")
 model = build_model(provider=current_provider)
 compression_manager = CompressionManager(
     model=model,
-    compress_tool_results=True,
-    compress_tool_results_limit=10,
+    compress_tool_results=False,
+    compress_tool_results_limit=None,
 )
+visualization_tools = VisualizationTools(
+    db_url=f"sqlite:///{DB_PATH}",
+    base_url=AGENT_BASE_URL,
+    output_dir=workspace.output_dir,
+)
+skills = Skills(loaders=[LocalSkills(str(SKILLS_DIR))])
 
 assistant = Agent(
     name="Assistant",
@@ -546,22 +754,129 @@ assistant = Agent(
     tools=[
         FileToolkit(),
         BashToolkit(),
+        WorkProductToolkit(),
         DuckDuckGoTools(enable_search=True, enable_news=True),
+        visualization_tools,
     ],
+    skills=skills,
     instructions=CODE_ASSISTANT_INSTRUCTIONS,
     markdown=True,
-    compress_tool_results=True,
+    compress_tool_results=False,
     compression_manager=compression_manager,
     add_history_to_context=True,
-    num_history_runs=10,
-    read_chat_history=True,
+    num_history_runs=3,
+    max_tool_calls_from_history=0,
+    read_chat_history=False,
+    tool_call_limit=40,
+    expected_output="A completed answer with concrete results and artifact paths when files are created. Never return only a plan.",
+    debug_mode=True,
+    telemetry=False,
+)
+
+data_analyst = Agent(
+    name="Data Analyst",
+    role="Profiles Excel workbooks deeply, creates durable analysis reports, and produces chart assets.",
+    model=model,
+    db=db,
+    tools=[
+        FileToolkit(),
+        WorkProductToolkit(),
+        visualization_tools,
+    ],
+    skills=skills,
+    instructions=[
+        "Use the Excel skill for workbook analysis.",
+        "For Excel-to-PPT requests, call create_excel_analysis_ppt(workbook_path, output_name) first so the full report, chart, and deck pipeline completes in one tool call.",
+        "Use an absolute workbook path when the user provides one, and return the tool JSON result with artifact paths.",
+        "Do not run the Excel skill script directly for Excel-to-PPT work unless create_excel_analysis_ppt is unavailable or fails.",
+        "Do not stop after one chart if the task asks for a work product; produce a complete report and multiple relevant visuals.",
+        "Your final response must not be empty. Return artifact paths and concise quality notes.",
+    ],
+    markdown=True,
+    compress_tool_results=False,
+    compression_manager=compression_manager,
+    tool_call_limit=30,
+    expected_output="Concrete artifact paths, findings, and quality notes. Never return an empty or plan-only result.",
+    telemetry=False,
+)
+
+presentation_builder = Agent(
+    name="Presentation Builder",
+    role="Builds PowerPoint decks from reports, outlines, and chart assets.",
+    model=model,
+    db=db,
+    tools=[
+        FileToolkit(),
+        WorkProductToolkit(),
+    ],
+    skills=skills,
+    instructions=[
+        "Use the PPT skill for any deck or slide request.",
+        "Build decks only after a report or outline exists.",
+        "When you have or can produce a slide outline, prefer create_ppt_from_markdown so deck creation completes in one tool call.",
+        "Stay inside the assigned workspace. Use glob/read for discovery and do not perform broad filesystem searches.",
+        "Verify the final .pptx path exists and report the slide count when available.",
+        "Your final response must not be empty. Return the final deck path and any source report/chart paths used.",
+    ],
+    markdown=True,
+    compress_tool_results=False,
+    compression_manager=compression_manager,
+    tool_call_limit=30,
+    expected_output="The final deck path, slide count when available, and source report/chart paths. Never return an empty or plan-only result.",
+    telemetry=False,
+)
+
+quality_reviewer = Agent(
+    name="Quality Reviewer",
+    role="Reviews generated reports and decks for completeness, missing artifacts, and shallow findings.",
+    model=model,
+    db=db,
+    tools=[FileToolkit(), BashToolkit()],
+    instructions=[
+        "Check whether the report has concrete values, enough findings, multiple relevant charts, and a valid PPTX artifact.",
+        "Flag placeholder text, missing charts, and shallow analysis.",
+        "Stay inside the assigned workspace. Do not perform broad filesystem searches.",
+        "Keep feedback actionable and grounded in generated files.",
+        "Your final response must not be empty.",
+    ],
+    markdown=True,
+    compress_tool_results=False,
+    compression_manager=compression_manager,
+    tool_call_limit=25,
+    expected_output="A grounded quality review with pass/fail status and concrete file paths inspected. Never return an empty result.",
+    telemetry=False,
+)
+
+work_product_team = Team(
+    name="Work Product Team",
+    role="Long-running team for deep spreadsheet analysis, reports, charts, and PowerPoint decks.",
+    mode=TeamMode.tasks,
+    max_iterations=8,
+    model=model,
+    db=db,
+    members=[data_analyst, presentation_builder, quality_reviewer],
+    instructions=[
+        "Run as a task loop until the work product is complete, not after the first chart or first finding.",
+        "For Excel-to-PPT requests, create one primary task for Data Analyst to call create_excel_analysis_ppt with the workbook path and output name. Do not split profile, report, charts, and deck into separate dependent tasks unless the one-call pipeline fails.",
+        "Use Presentation Builder only after report/chart artifacts exist, unless Data Analyst already produced the deck.",
+        "Use Quality Reviewer to inspect the generated report and deck before the final response.",
+        "Do not synthesize or invent artifact paths. If a member result is empty, retry once with explicit instructions to call the concrete tool and return the tool output.",
+        "Keep all file discovery inside the assigned workspace. Do not use broad searches from filesystem root.",
+        "Success means there is a concrete report, several relevant chart assets when the data supports them, a valid PPTX deck, and a final response with artifact paths.",
+    ],
+    expected_output="A completed work-product summary with report, chart, and PPTX artifact paths plus a quality review.",
+    markdown=True,
+    show_members_responses=True,
+    store_member_responses=True,
     debug_mode=True,
     telemetry=False,
 )
 
 agent_os = AgentOS(
     name="Code Assist",
+    db=db,
     agents=[assistant],
+    teams=[work_product_team],
     cors_allowed_origins=["http://localhost:3000"],
 )
 
@@ -576,6 +891,31 @@ app = agent_os.get_app()
 @app.get("/api/providers", tags=["Providers"])
 async def list_providers():
     return {"providers": PROVIDERS}
+
+
+@app.get("/api/charts/{chart_id}", tags=["Charts"])
+async def get_chart(chart_id: str):
+    png_bytes = visualization_tools.get_chart_bytes(chart_id)
+    if png_bytes is None:
+        return Response(status_code=404, content=b"chart not found")
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@app.get("/api/artifacts", tags=["Artifacts"])
+async def get_artifact(path: str):
+    """Serve files generated under the configured output directory."""
+    try:
+        artifact_path = pathlib.Path(path).resolve()
+        artifact_path.relative_to(workspace.output_dir.resolve())
+    except Exception:
+        return Response(status_code=403, content=b"artifact path is outside output directory")
+    if not artifact_path.exists() or not artifact_path.is_file():
+        return Response(status_code=404, content=b"artifact not found")
+    return FileResponse(
+        path=str(artifact_path),
+        filename=artifact_path.name,
+        content_disposition_type="inline",
+    )
 
 
 @app.get("/api/providers/{provider}/models", tags=["Providers"])
@@ -642,6 +982,10 @@ async def switch_model(body: dict):
         current_provider = provider
         new_model = build_model(provider=provider, model_id=model_id)
         assistant.model = new_model
+        data_analyst.model = new_model
+        presentation_builder.model = new_model
+        quality_reviewer.model = new_model
+        work_product_team.model = new_model
         compression_manager.model = new_model
         return {"status": "ok", "model": model_id, "provider": provider}
     except Exception as e:
@@ -688,6 +1032,7 @@ async def set_output_dir(body: dict):
     if not path:
         return {"error": "path is required"}
     result = workspace.set_output_dir(path)
+    visualization_tools.output_dir = workspace.output_dir
     if result == "ok":
         return workspace.to_dict()
     return {"error": result}

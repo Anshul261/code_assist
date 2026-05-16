@@ -25,6 +25,7 @@ tmp/
 *.db
 
 # Node
+node_modules/
 ui/node_modules/
 ui/.next/
 ui/out/

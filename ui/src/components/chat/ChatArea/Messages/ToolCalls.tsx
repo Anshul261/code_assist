@@ -5,13 +5,16 @@ import type { ToolCall } from '@/types/os'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-type Category = 'file' | 'bash' | 'search' | 'plan' | 'other'
+type Category = 'file' | 'bash' | 'search' | 'plan' | 'work' | 'chart' | 'skill' | 'other'
 
 function getCategory(name: string): Category {
   if (['read', 'write', 'edit', 'glob', 'grep', 'ls'].includes(name)) return 'file'
   if (name === 'bash') return 'bash'
   if (name.startsWith('duckduckgo')) return 'search'
   if (['create_plan', 'update_todo', 'mark_done'].includes(name)) return 'plan'
+  if (name === 'create_excel_analysis_ppt') return 'work'
+  if (name.startsWith('create_') && (name.includes('chart') || name.includes('plot') || name.includes('histogram'))) return 'chart'
+  if (name.startsWith('get_skill')) return 'skill'
   return 'other'
 }
 
@@ -28,6 +31,16 @@ const LABEL: Record<string, string> = {
   create_plan: 'PLAN',
   update_todo: 'UPDATE TODO',
   mark_done: 'DONE',
+  create_excel_analysis_ppt: 'EXCEL → PPT',
+  create_bar_chart: 'BAR CHART',
+  create_line_chart: 'LINE CHART',
+  create_pie_chart: 'PIE CHART',
+  create_scatter_plot: 'SCATTER',
+  create_histogram: 'HISTOGRAM',
+  save_chart_image: 'SAVE CHART',
+  get_skill_instructions: 'SKILL',
+  get_skill_reference: 'REFERENCE',
+  get_skill_script: 'SCRIPT',
 }
 
 const DOT: Record<Category, string> = {
@@ -35,11 +48,14 @@ const DOT: Record<Category, string> = {
   bash:   'bg-amber-400/70',
   search: 'bg-emerald-400/70',
   plan:   'bg-purple-400/70',
+  work:   'bg-cyan-400/80',
+  chart:  'bg-rose-400/70',
+  skill:  'bg-violet-400/70',
   other:  'bg-muted/40',
 }
 
-function primaryArg(args: Record<string, string>): string {
-  const order = ['path', 'cmd', 'query', 'pat', 'q']
+function primaryArg(args: Record<string, unknown>): string {
+  const order = ['workbook_path', 'output_name', 'path', 'cmd', 'query', 'pat', 'q', 'skill_name', 'script_path']
   for (const key of order) {
     if (args[key]) {
       const val = String(args[key])
@@ -94,7 +110,13 @@ const Chip = ({ tc, active, onClick }: ChipProps) => {
 const DetailPanel = ({ tc }: { tc: ToolCall }) => {
   const args = tc.tool_args ?? {}
   const hasArgs = Object.keys(args).length > 0
-  const content = typeof tc.content === 'string' ? tc.content : null
+  const result = (tc as ToolCall & { result?: string | null }).result
+  const content =
+    typeof tc.content === 'string'
+      ? tc.content
+      : typeof result === 'string'
+        ? result
+        : null
 
   return (
     <div className="mt-1 rounded-lg border border-border/60 bg-background text-xs">

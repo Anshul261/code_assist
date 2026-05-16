@@ -7,6 +7,7 @@ import Audios from './Multimedia/Audios'
 import { memo } from 'react'
 import AgentThinkingLoader from './AgentThinkingLoader'
 import ToolCalls from './ToolCalls'
+import Artifacts from './Artifacts'
 
 interface MessageProps {
   message: ChatMessage
@@ -32,6 +33,7 @@ const AgentMessage = ({ message }: MessageProps) => {
         {message.tool_calls && message.tool_calls.length > 0 && (
           <ToolCalls toolCalls={message.tool_calls} />
         )}
+        <Artifacts toolCalls={message.tool_calls} />
         <MarkdownRenderer>{message.content}</MarkdownRenderer>
         {message.videos && message.videos.length > 0 && (
           <Videos videos={message.videos} />
