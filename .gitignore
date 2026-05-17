@@ -42,6 +42,7 @@ Thumbs.db
 
 # Test workspace
 test/
+lg_workspace/
 
 # Lock files (uv)
 # uv.lock is kept for reproducibility

@@ -1,67 +1,102 @@
 ---
 name: ppt
-description: Use for creating PowerPoint presentations, slide outlines, PPTX files, executive decks, report-to-deck conversion, and embedding chart/image assets into slides with PPTXGenJS.
+description: Use for creating warm editorial PowerPoint presentations, keynote-style decks, slide outlines, PPTX files, executive decks, report-to-deck conversion, and research-to-deck conversion.
 ---
 
 # PowerPoint Skill
 
-Use this skill when the user asks for a PPT, PowerPoint, presentation, slide deck, executive deck, board deck, training deck, or when a report should be converted into slides.
+Use `run_ppt_skill` when a user asks for a presentation from notes, research, or a report and markdown is enough.
 
-## Workflow
+Use `create_powerpoint` when the deck needs richer control over slide type, subtitle, stats, diagram, chart, code block, quote, or footer text.
 
-1. Confirm the source material: report markdown, scratch notes, document summary, Excel analysis, research notes, and chart/image assets.
-2. Create `scratch/*-slide-outline.md` before generating a deck. Each `##` heading becomes a slide when using the script.
-3. Keep slide content concise. A slide should normally have one message, one supporting visual or 3-5 bullets.
-4. Use existing PNG assets from `assets/`. If charts are only in the visualization DB, save them to `assets/` before deck creation.
-5. Generate the PPTX with:
-   ```bash
-   node skills/ppt/scripts/create_pptx.js --spec output/scratch/slide-outline.md --output output/decks/presentation.pptx
-   ```
-   Use the active output directory if it is not `output`.
-6. Verify the command returns `status: success`, the `.pptx` exists, and the slide count is plausible.
+## Visual Style
 
-## Slide Outline Format
+The default PPT style should match a warm editorial keynote:
 
-The script accepts markdown or JSON. Markdown is usually enough:
+- off-white / warm paper background
+- large serif titles, usually left-aligned
+- muted gray body text
+- deep navy accents for key terms, rules, numbers, and charts
+- generous whitespace
+- small uppercase monospace section labels such as `01 · AGENT LOOP`
+- small footer label at bottom-left and slide number at bottom-right
+- minimal diagrams using rings, thin lines, rounded rectangles, and sparse labels
+- no heavy gradients, decorative blobs, dense cards, or default PowerPoint theme look
+- keep each slide focused on one idea
+
+## Rich JSON Schema
+
+`slides_json` is a JSON list. Useful fields:
+
+```json
+[
+  {
+    "cover_kicker": "KEYNOTE · 2026",
+    "subtitle": "Loops, harness, context, memory: what actually matters in production.",
+    "meta": "code assist demo · A4 landscape · 7 slides",
+    "deck_label": "AGENT ENGINEERING"
+  },
+  {
+    "section": "01 · AGENT LOOP",
+    "title": "Simple core, complex surroundings",
+    "subtitle": "The loop is small. The infrastructure around it is what keeps it stable.",
+    "bullets": [
+      "A working Agent loop fits in about 20 lines of code.",
+      "Control flow lives in the tools, not in branchy internal state."
+    ],
+    "quote": "If your loop keeps growing every sprint, you are fixing the wrong layer.",
+    "diagram": {"type": "loop", "labels": ["PLAN", "ACT", "OBSERVE", "REFLECT"]}
+  },
+  {
+    "section": "02 · HARNESS",
+    "title": "Harness wins over hardware",
+    "subtitle": "Verification, boundaries, feedback, and fallbacks matter more than model capability.",
+    "bullets": ["Upgrade the harness first.", "Evaluation is the only honest signal."],
+    "stats": [
+      {"value": "20", "label": "lines of code in a working Agent core loop"},
+      {"value": "4", "label": "harness layers that matter"},
+      {"value": "10×", "label": "velocity gains trace to execution discipline"}
+    ]
+  },
+  {
+    "section": "03 · CONTEXT",
+    "title": "Density beats length",
+    "subtitle": "Long context windows do not fix weak context design.",
+    "bullets": ["Layer the load.", "Index first, full content on demand."],
+    "chart": {
+      "title": "Loading strategy vs accuracy",
+      "labels": ["Flat loading", "Layered loading"],
+      "values": [53, 85],
+      "target": 85
+    }
+  },
+  {
+    "section": "05 · CODE STYLE",
+    "title": "Pseudocode over syntax",
+    "subtitle": "The reader sees logic, not a language tutorial.",
+    "bullets": ["Write the intent first.", "One concept per block."],
+    "code": "# resolve tool call or decide to stop\nfunction agent_step(context, tools):\n    action = model.think(context)\n    if action.type == \"stop\":\n        return action.result"
+  },
+  {
+    "section": "END OF DECK",
+    "title": "Protocol first.\nThen parallelism.",
+    "subtitle": "Fix your evals before you tweak the Agent.",
+    "quote": "Protocol first.\nThen parallelism."
+  }
+]
+```
+
+## Outline Format
 
 ```markdown
 # Deck Title
 
-## Executive Summary
-- Point one
-- Point two
-- Point three
+## First Slide
+- Short point
+- Short point
 
-## Trend Analysis
-- Key takeaway
-- Implication
-![Revenue Trend](../assets/revenue-trend.png)
+## Second Slide
+- Short point
 ```
 
-Image paths are resolved relative to the markdown file. Put reusable images in `assets/`.
-
-## JSON Spec Format
-
-Use JSON when exact control is needed:
-
-```json
-{
-  "title": "Deck Title",
-  "subtitle": "Optional subtitle",
-  "slides": [
-    {
-      "title": "Executive Summary",
-      "bullets": ["Point one", "Point two"],
-      "images": [{"path": "/absolute/path/to/chart.png"}]
-    }
-  ]
-}
-```
-
-## Quality Rules
-
-- Do not make the title a generic phrase if a specific business topic exists.
-- Do not paste dense report paragraphs into slides; convert them into tight bullets.
-- Prefer charts/images for data-heavy slides.
-- Keep citations, source URLs, and detailed methodology in report markdown unless the user asks to include them in the deck.
-- Always report the final `.pptx` path and any source files used.
+The tool stores the markdown outline in sandbox scratch space and writes the `.pptx` under sandbox outputs.
