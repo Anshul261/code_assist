@@ -111,7 +111,6 @@ class Sandbox:
                 results.append(
                     {
                         "path": str(path.relative_to(self.outputs_dir)),
-                        "absolute_path": str(path),
                         "download_url": f"/download/{path.relative_to(self.outputs_dir).as_posix()}",
                         "size": stat.st_size,
                     }

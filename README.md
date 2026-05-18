@@ -57,6 +57,40 @@ The API docs are still available at:
 http://localhost:7789/docs
 ```
 
+Local testing still works without auth. If `APP_BASE_URL` is left as the local default and Railway is not detected, auth is not required and the in-app model configuration form remains enabled.
+
+## Railway Deployment Security
+
+For a public Railway deployment, set up WorkOS before exposing the app. The app treats HTTPS/Railway as auth-required and fails closed with `503` if WorkOS or the session secret is missing.
+
+Minimum Railway variables:
+
+```bash
+AUTH_ENABLED=true
+APP_BASE_URL="https://your-app.up.railway.app"
+WORKOS_API_KEY="..."
+WORKOS_CLIENT_ID="..."
+SESSION_SECRET="a-32-byte-or-longer-random-secret"
+OPENAI_API_KEY="..."
+# or OPENROUTER_API_KEY="..."
+```
+
+In WorkOS:
+
+```text
+Redirect URI: https://your-app.up.railway.app/auth/callback
+```
+
+Enable MFA from the WorkOS Dashboard Authentication settings. AuthKit handles TOTP enrollment and verification in the hosted login flow, so the app does not need to store MFA secrets.
+
+Security defaults for public deploys:
+
+- Auth is required on Railway/HTTPS.
+- User uploads, outputs, memory, and LangGraph checkpoints are separated by authenticated user.
+- Runtime model/API-key changes are disabled unless `ALLOW_RUNTIME_MODEL_CONFIG=true`.
+- Uploads are capped at 25 MB by default; set `MAX_UPLOAD_MB` to change this.
+- API responses no longer expose server absolute file paths.
+
 ## Local Storage
 
 - Uploads: `lg_workspace/uploads`

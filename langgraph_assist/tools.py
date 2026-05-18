@@ -57,7 +57,6 @@ def build_tools(sandbox: Sandbox, memory: MemoryStore):
                 files.append(
                     {
                         "path": str(path.relative_to(sandbox.uploads_dir)),
-                        "absolute_path": str(path),
                         "size": path.stat().st_size,
                     }
                 )
