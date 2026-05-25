@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import pandas as pd
@@ -139,17 +142,17 @@ def build_tools(sandbox: Sandbox, memory: MemoryStore):
         append_log("research", "Fetching URL", url)
         try:
             headers = {"User-Agent": "code-assist-langgraph-prototype/0.1"}
-            with httpx.Client(follow_redirects=True, timeout=20, headers=headers) as client:
-                response = client.get(url)
-                response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            text = response.text
+            max_chars = max(1000, min(max_chars, 50000))
+            with httpx.Client(follow_redirects=False, timeout=20, headers=headers) as client:
+                response_url, status_code, content_type, text = _fetch_public_text(
+                    client, url, max_chars
+                )
             return json.dumps(
                 {
-                    "url": str(response.url),
-                    "status_code": response.status_code,
+                    "url": response_url,
+                    "status_code": status_code,
                     "content_type": content_type,
-                    "text": text[:max_chars],
+                    "text": text,
                 },
                 indent=2,
             )
@@ -343,6 +346,49 @@ def build_tools(sandbox: Sandbox, memory: MemoryStore):
         remember,
         search_memory,
     ]
+
+
+def _fetch_public_text(client: httpx.Client, url: str, max_chars: int) -> tuple[str, int, str, str]:
+    current_url = url
+    for _ in range(4):
+        _validate_public_url(current_url)
+        with client.stream("GET", current_url) as response:
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    raise ValueError("redirect response has no location")
+                current_url = urljoin(current_url, location)
+                continue
+            response.raise_for_status()
+            data = bytearray()
+            byte_limit = min(max_chars * 4, 200000)
+            for chunk in response.iter_bytes():
+                data.extend(chunk)
+                if len(data) >= byte_limit:
+                    break
+            return (
+                str(response.url),
+                response.status_code,
+                response.headers.get("content-type", ""),
+                bytes(data).decode("utf-8", errors="replace")[:max_chars],
+            )
+    raise ValueError("too many redirects")
+
+
+def _validate_public_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("only public http and https URLs are supported")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs with credentials are not supported")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    if not addresses:
+        raise ValueError("URL host could not be resolved")
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise ValueError("private or non-public network URLs are blocked")
 
 
 def _short(value: str, limit: int) -> str:

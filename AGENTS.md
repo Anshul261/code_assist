@@ -14,7 +14,9 @@ This repo contains the active LangGraph-based agent prototype in `langgraph_assi
 
 The active runtime is:
 
-- `langgraph_assist/app.py`: FastAPI HTTP app, inline browser UI, auth middleware, uploads, downloads, chat endpoints, model configuration, per-user sandbox/agent selection.
+- `langgraph_assist/app.py`: FastAPI HTTP app, auth middleware, uploads, downloads, chat endpoints, model configuration, per-user sandbox/agent selection.
+- `langgraph_assist/templates/index.html`: Browser chat workspace UI, client-side session state, and API interactions.
+- `langgraph_assist/templates/signed-out.html`: Post-logout page.
 - `langgraph_assist/agent.py`: LangGraph ReAct agent construction, LLM provider setup, system prompt, SQLite checkpointer, memory store, tool wiring.
 - `langgraph_assist/tools.py`: LangChain tool definitions exposed to the LLM.
 - `langgraph_assist/sandbox.py`: App-level file path confinement helper for uploads, outputs, scratch, checkpoints, and memory DB paths.
@@ -22,7 +24,7 @@ The active runtime is:
 - `langgraph_assist/runlog.py`: In-memory per-session run activity logs shown in the UI.
 - `langgraph_assist/cli.py`: Local CLI entrypoint for invoking the agent.
 
-The browser UI is currently an inline HTML/JS string in `app.py`. It stores local UI sessions in browser `localStorage`, calls the FastAPI endpoints, polls activity logs, and renders output download links.
+The browser UI is served from static HTML templates. It stores local UI sessions in browser `localStorage`, calls the FastAPI endpoints, polls activity logs, and renders output download links.
 
 ## LLM And Agent Flow
 
@@ -198,36 +200,35 @@ WorkOS AuthKit is the intended auth provider for public deployment.
 Current auth routes:
 
 - `GET /auth/login`: redirect to WorkOS hosted AuthKit login.
-- `GET /auth/callback`: exchange code and store a signed session cookie.
-- `GET /auth/logout`: clear session.
+- `GET /auth/callback`: validate OAuth state, exchange code, and set an encrypted WorkOS sealed-session cookie.
+- `GET /auth/logout`: clear the session cookie and invoke WorkOS session logout.
 - `GET /auth/me`: report auth status and current user summary.
 
 Current auth behavior:
 
 - Local default: auth is off unless explicitly enabled.
-- Public/Railway/HTTPS: auth is required and the app fails closed if WorkOS config or `SESSION_SECRET` is missing.
+- Public/Railway/HTTPS: auth is required and the app fails closed if WorkOS config, `SESSION_SECRET`, or `WORKOS_COOKIE_PASSWORD` is missing.
 - Public mode uses per-user storage and per-user agent instances.
 - Public mode disables runtime model/API-key changes by default.
+- Authenticated requests validate WorkOS session tokens through the WorkOS SDK; login uses OAuth state validation.
 
 WorkOS setup still needs to be completed by the user before deployment:
 
 - Create WorkOS application.
 - Configure callback URL: `https://<railway-domain>/auth/callback`.
-- Set Railway variables for WorkOS client/API credentials, app base URL, session secret, and model provider key.
+- Set Railway variables for WorkOS client/API credentials, app base URL, session secret, WorkOS cookie password, and model provider key.
 - Enable MFA in the WorkOS dashboard. AuthKit should handle hosted TOTP enrollment and verification; the app should not store MFA secrets.
 
 Future auth hardening:
 
 - Add allowed-email or allowed-domain checks for the first private deployment.
 - Add explicit admin role logic before exposing runtime model configuration in public mode.
-- Add logout session revocation if WorkOS supports the selected flow.
-- Add security headers middleware.
-- Add rate limiting on `/chat`, `/upload`, and auth endpoints.
+- Consider durable/distributed rate limiting if deployment moves beyond a single Railway volume-backed instance.
 - Add audit logs for login, upload, chat start, tool use, and downloads.
 
 ## UI State
 
-The current UI is inline and functional, not a full frontend app.
+The current UI is static HTML/JS served by FastAPI and functional, not a full frontend app.
 
 Current UI capabilities:
 
@@ -301,7 +302,7 @@ Before public Railway deployment:
 - `SESSION_SECRET` is strong and unique.
 - Provider API key is configured on Railway.
 - Railway persistent volume is configured if long-term memory/checkpoints/files must survive redeploys.
+- Railway volume is mounted at `/data`, and `RAILWAY_RUN_UID=0` is set so the hardened entrypoint can initialize volume ownership before dropping to UID `10001`.
 - Runtime model config remains disabled unless there is an admin layer.
 - Upload size limit is acceptable for the deployment.
 - No absolute server paths appear in public API responses.
-

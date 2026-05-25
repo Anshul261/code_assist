@@ -117,6 +117,15 @@ class Sandbox:
                 )
         return results
 
+    def storage_size(self) -> int:
+        self.ensure()
+        return sum(
+            path.stat().st_size
+            for directory in [self.uploads_dir, self.outputs_dir, self.scratch_dir]
+            for path in directory.rglob("*")
+            if path.is_file()
+        )
+
     def copy_into_outputs(self, source: Path, output_name: str | None = None) -> Path:
         self.ensure()
         name = slugify(output_name or source.name)

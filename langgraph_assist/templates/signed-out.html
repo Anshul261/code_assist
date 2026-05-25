@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signed out</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f7f5ef;
+      color: #171717;
+      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+    }
+    main {
+      width: min(520px, calc(100vw - 40px));
+      border-left: 3px solid #9f2f25;
+      padding: 8px 0 8px 22px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 42px;
+      line-height: 1;
+      font-weight: 500;
+    }
+    p {
+      margin: 0 0 22px;
+      color: #6f6b63;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      line-height: 1.45;
+    }
+    a {
+      color: #9f2f25;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Signed out</h1>
+    <p>Your local app session has been cleared.</p>
+    <a href="/auth/login">Sign in again</a>
+  </main>
+</body>
+</html>

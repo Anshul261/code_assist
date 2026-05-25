@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
+import threading
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -12,10 +16,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 from workos import WorkOSClient
+from workos.session import seal_session_from_auth_response
 
 from .agent import LangGraphAgent, ModelConfig
 from .runlog import append_log, get_logs
 from .sandbox import Sandbox, sandbox_from_env
+
+
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+INDEX_HTML_PATH = TEMPLATES_DIR / "index.html"
+SIGNED_OUT_HTML_PATH = TEMPLATES_DIR / "signed-out.html"
 
 
 class ChatRequest(BaseModel):
@@ -39,55 +49,93 @@ WORKOS_CLIENT_ID = os.getenv("WORKOS_CLIENT_ID", "").strip()
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:7789").rstrip("/")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-session-secret-change-me")
 SESSION_SECRET_READY = bool(os.getenv("SESSION_SECRET"))
-AUTH_READY = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID and SESSION_SECRET_READY)
+WORKOS_COOKIE_PASSWORD = os.getenv("WORKOS_COOKIE_PASSWORD", "").strip()
+AUTH_READY = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID and SESSION_SECRET_READY and WORKOS_COOKIE_PASSWORD)
 PUBLIC_DEPLOYMENT = APP_BASE_URL.startswith("https://") or bool(os.getenv("RAILWAY_ENVIRONMENT"))
 AUTH_REQUIRED = AUTH_ENABLED or PUBLIC_DEPLOYMENT
 ALLOW_RUNTIME_MODEL_CONFIG = os.getenv(
     "ALLOW_RUNTIME_MODEL_CONFIG",
-    "false" if AUTH_REQUIRED else "true",
+    "false" if PUBLIC_DEPLOYMENT else "true",
 ).lower() in {"1", "true", "yes", "on"}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+MAX_USER_STORAGE_BYTES = int(os.getenv("MAX_USER_STORAGE_MB", "250")) * 1024 * 1024
+CHAT_REQUESTS_PER_MINUTE = int(os.getenv("CHAT_REQUESTS_PER_MINUTE", "12"))
+UPLOAD_REQUESTS_PER_MINUTE = int(os.getenv("UPLOAD_REQUESTS_PER_MINUTE", "6"))
 SAFE_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+WORKOS_SESSION_COOKIE = "wos_session"
+_rate_events: dict[str, deque[float]] = defaultdict(deque)
+_rate_lock = threading.Lock()
+CORS_ORIGINS = [APP_BASE_URL]
+if not PUBLIC_DEPLOYMENT:
+    CORS_ORIGINS.extend(
+        [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        ]
+    )
 
 workos_client = WorkOSClient(api_key=WORKOS_API_KEY, client_id=WORKOS_CLIENT_ID) if AUTH_READY else None
 
 app = FastAPI(title="Code Assist LangGraph Prototype")
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=SESSION_SECRET,
-    same_site="lax",
-    https_only=APP_BASE_URL.startswith("https://"),
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        APP_BASE_URL,
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def auth_missing_detail() -> str:
-    return "Auth is enabled but WORKOS_API_KEY, WORKOS_CLIENT_ID, or SESSION_SECRET is missing."
+    return (
+        "Auth is enabled but WORKOS_API_KEY, WORKOS_CLIENT_ID, SESSION_SECRET, "
+        "or WORKOS_COOKIE_PASSWORD is missing."
+    )
 
 
 def workos_user_payload(user) -> dict[str, str]:
-    first_name = getattr(user, "first_name", "") or ""
-    last_name = getattr(user, "last_name", "") or ""
-    email = getattr(user, "email", "") or ""
+    def value(field: str) -> str:
+        if isinstance(user, dict):
+            return str(user.get(field) or "")
+        return str(getattr(user, field, "") or "")
+
+    first_name = value("first_name")
+    last_name = value("last_name")
+    email = value("email")
     name = " ".join(part for part in [first_name, last_name] if part).strip()
     return {
-        "sub": getattr(user, "id", "") or email,
+        "sub": value("id") or email,
         "name": name or email or "Authenticated user",
         "email": email,
-        "picture": getattr(user, "profile_picture_url", "") or "",
+        "picture": value("profile_picture_url"),
     }
+
+
+def set_workos_cookie(response, value: str) -> None:
+    response.set_cookie(
+        WORKOS_SESSION_COOKIE,
+        value,
+        httponly=True,
+        secure=PUBLIC_DEPLOYMENT,
+        samesite="lax",
+        max_age=60 * 60 * 12,
+    )
+
+
+def authenticate_workos_request(request: Request) -> str | None:
+    sealed_session = request.cookies.get(WORKOS_SESSION_COOKIE, "")
+    if not sealed_session or workos_client is None:
+        return None
+    session = workos_client.user_management.load_sealed_session(
+        session_data=sealed_session,
+        cookie_password=WORKOS_COOKIE_PASSWORD,
+    )
+    auth_response = session.authenticate()
+    if auth_response.authenticated and auth_response.user:
+        request.state.user = workos_user_payload(auth_response.user)
+        request.state.workos_session = session
+        return None
+    refreshed = session.refresh()
+    if refreshed.authenticated and refreshed.user:
+        request.state.user = workos_user_payload(refreshed.user)
+        request.state.workos_session = session
+        return refreshed.sealed_session
+    return None
 
 
 @app.middleware("http")
@@ -97,21 +145,66 @@ async def require_auth(request: Request, call_next):
             return JSONResponse(status_code=403, content={"detail": "Cross-site request blocked"})
     if not AUTH_REQUIRED:
         return await call_next(request)
-    public_prefixes = ("/auth/",)
-    public_paths = {"/favicon.ico"}
-    if request.url.path in public_paths or request.url.path.startswith(public_prefixes):
+    public_paths = {
+        "/auth/login",
+        "/auth/callback",
+        "/auth/logout",
+        "/favicon.ico",
+        "/health",
+        "/signed-out",
+    }
+    if request.url.path in public_paths:
         return await call_next(request)
     if not AUTH_READY:
         return JSONResponse(
             status_code=503,
             content={"detail": auth_missing_detail()},
         )
-    if request.session.get("user"):
-        return await call_next(request)
+    refreshed_session = authenticate_workos_request(request)
+    if getattr(request.state, "user", None):
+        response = await call_next(request)
+        if refreshed_session:
+            set_workos_cookie(response, refreshed_session)
+        return response
     accept = request.headers.get("accept", "")
     if "text/html" in accept:
         return RedirectResponse(url="/auth/login")
     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    same_site="lax",
+    https_only=APP_BASE_URL.startswith("https://"),
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "
+        "form-action 'self'; img-src 'self' data: https:; "
+        "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    if PUBLIC_DEPLOYMENT:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if AUTH_REQUIRED and request.url.path not in {"/favicon.ico"}:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/auth/login")
@@ -126,7 +219,9 @@ async def auth_login(request: Request):
     authorization_url = workos_client.user_management.get_authorization_url(
         provider="authkit",
         redirect_uri=redirect_uri,
+        state=(state := secrets.token_urlsafe(32)),
     )
+    request.session["oauth_state"] = state
     return RedirectResponse(url=authorization_url)
 
 
@@ -139,15 +234,40 @@ async def auth_callback(request: Request):
     code = request.query_params.get("code")
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code")
+    expected_state = request.session.pop("oauth_state", "")
+    received_state = request.query_params.get("state", "")
+    if not expected_state or not secrets.compare_digest(expected_state, received_state):
+        raise HTTPException(status_code=400, detail="Invalid authentication state")
     auth_response = workos_client.user_management.authenticate_with_code(code=code)
-    request.session["user"] = workos_user_payload(auth_response.user)
-    return RedirectResponse(url="/")
+    sealed_session = seal_session_from_auth_response(
+        access_token=auth_response.access_token,
+        refresh_token=auth_response.refresh_token,
+        user=auth_response.user.to_dict(),
+        cookie_password=WORKOS_COOKIE_PASSWORD,
+    )
+    request.session.clear()
+    response = RedirectResponse(url="/")
+    set_workos_cookie(response, sealed_session)
+    return response
 
 
 @app.get("/auth/logout")
 async def auth_logout(request: Request):
+    sealed_session = request.cookies.get(WORKOS_SESSION_COOKIE, "")
     request.session.clear()
-    return RedirectResponse(url="/")
+    logout_url = "/signed-out"
+    if AUTH_READY and workos_client is not None and sealed_session:
+        session = workos_client.user_management.load_sealed_session(
+            session_data=sealed_session,
+            cookie_password=WORKOS_COOKIE_PASSWORD,
+        )
+        try:
+            logout_url = session.get_logout_url(return_to=f"{APP_BASE_URL}/signed-out")
+        except ValueError:
+            pass
+    response = RedirectResponse(url=logout_url)
+    response.delete_cookie(WORKOS_SESSION_COOKIE)
+    return response
 
 
 @app.get("/auth/me")
@@ -156,14 +276,19 @@ def auth_me(request: Request) -> dict:
         "auth_enabled": AUTH_REQUIRED,
         "auth_ready": AUTH_READY,
         "provider": "workos",
-        "user": request.session.get("user"),
+        "user": getattr(request.state, "user", None),
         "runtime_model_config_allowed": ALLOW_RUNTIME_MODEL_CONFIG,
     }
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return UI_HTML
+def index():
+    return FileResponse(INDEX_HTML_PATH, media_type="text/html")
+
+
+@app.get("/signed-out", response_class=HTMLResponse)
+def signed_out():
+    return FileResponse(SIGNED_OUT_HTML_PATH, media_type="text/html")
 
 
 @app.get("/health")
@@ -214,10 +339,15 @@ def update_model_config(request: ModelConfigRequest) -> dict[str, str | bool | f
 
 @app.post("/upload")
 async def upload(request: Request, file: UploadFile = File(...)) -> dict[str, str | int]:
-    data = await file.read()
+    enforce_rate_limit(request, "upload", UPLOAD_REQUESTS_PER_MINUTE)
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"File is larger than {MAX_UPLOAD_BYTES // 1024 // 1024} MB")
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is larger than {MAX_UPLOAD_BYTES // 1024 // 1024} MB",
+        )
     active_sandbox = sandbox_for_request(request)
+    enforce_storage_quota(active_sandbox, additional_bytes=len(data))
     saved = active_sandbox.save_upload(file.filename or f"upload-{uuid4().hex}", data)
     return {
         "status": "success",
@@ -245,10 +375,12 @@ def list_uploads(request: Request) -> list[dict[str, str | int]]:
 
 @app.post("/chat")
 def chat(payload: ChatRequest, request: Request) -> dict:
+    enforce_rate_limit(request, "chat", CHAT_REQUESTS_PER_MINUTE)
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="message is required")
     session_id = validate_session_id(payload.session_id)
     scoped_session_id = scoped_run_id(request, session_id)
+    enforce_storage_quota(sandbox_for_request(request))
     try:
         return get_agent(request).invoke(payload.message, session_id=scoped_session_id)
     except RuntimeError as exc:
@@ -271,10 +403,17 @@ def list_outputs(request: Request) -> list[dict[str, str | int]]:
 
 @app.get("/download/{artifact_path:path}")
 def download(artifact_path: str, request: Request):
-    path = sandbox_for_request(request).resolve_output(artifact_path)
+    try:
+        path = sandbox_for_request(request).resolve_output(artifact_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="artifact not found") from exc
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
-    return FileResponse(str(path), filename=Path(path).name)
+    return FileResponse(
+        str(path),
+        filename=Path(path).name,
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 def get_agent(request: Request) -> LangGraphAgent:
@@ -293,7 +432,7 @@ def sandbox_for_request(request: Request) -> Sandbox:
 def user_storage_key(request: Request) -> str:
     if not AUTH_REQUIRED:
         return "local"
-    user = request.session.get("user") or {}
+    user = getattr(request.state, "user", None) or {}
     subject = str(user.get("sub") or user.get("email") or "")
     if not subject:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -312,13 +451,43 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
+def enforce_rate_limit(request: Request, action: str, limit: int) -> None:
+    if not AUTH_REQUIRED or limit <= 0:
+        return
+    key = f"{user_storage_key(request)}:{action}"
+    now = time.monotonic()
+    window_start = now - 60
+    with _rate_lock:
+        events = _rate_events[key]
+        while events and events[0] <= window_start:
+            events.popleft()
+        if len(events) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many {action} requests. Try again shortly.",
+                headers={"Retry-After": "60"},
+            )
+        events.append(now)
+
+
+def enforce_storage_quota(sandbox: Sandbox, additional_bytes: int = 0) -> None:
+    if MAX_USER_STORAGE_BYTES <= 0:
+        return
+    if sandbox.storage_size() + additional_bytes > MAX_USER_STORAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="User storage limit reached. Contact the administrator to clean up stored artifacts.",
+        )
+
+
 def _request_origin_allowed(request: Request) -> bool:
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         return True
-    return _same_origin(origin, APP_BASE_URL) or _same_origin(
-        origin,
-        f"{request.url.scheme}://{request.url.netloc}",
+    if _same_origin(origin, APP_BASE_URL):
+        return True
+    return not PUBLIC_DEPLOYMENT and _same_origin(
+        origin, f"{request.url.scheme}://{request.url.netloc}"
     )
 
 
@@ -335,1175 +504,3 @@ def _same_origin(candidate: str, expected: str) -> bool:
 
 def _default_port(scheme: str) -> int | None:
     return 443 if scheme == "https" else 80 if scheme == "http" else None
-
-
-UI_HTML = """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Code Assist LangGraph</title>
-  <style>
-    :root {
-      --bg: #f7f5ef;
-      --paper: #fbfaf6;
-      --panel: #fffdfa;
-      --ink: #171717;
-      --muted: #6f6b63;
-      --quiet: #8b877f;
-      --rule: #e7e2d8;
-      --accent: #9f2f25;
-      --accent-soft: #fae9e4;
-      --field: #fffefa;
-      --message: rgba(255, 253, 250, 0.64);
-      --focus: rgba(159, 47, 37, 0.13);
-      --danger: #8a3a2d;
-    }
-    [data-theme="dark"] {
-      --bg: #171312;
-      --paper: #1f1a18;
-      --panel: #28211f;
-      --ink: #f5efe6;
-      --muted: #c5b7ab;
-      --quiet: #9f9187;
-      --rule: #453a35;
-      --accent: #e15d4f;
-      --accent-soft: #41231f;
-      --field: #211c1a;
-      --message: rgba(40, 33, 31, 0.78);
-      --focus: rgba(225, 93, 79, 0.18);
-      --danger: #f08a7c;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
-    }
-    .shell {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      min-height: 100vh;
-    }
-    aside {
-      border-right: 1px solid var(--rule);
-      padding: 24px 20px;
-      background: var(--paper);
-      display: grid;
-      align-content: start;
-      gap: 18px;
-      max-height: 100vh;
-      overflow: auto;
-      position: sticky;
-      top: 0;
-    }
-    main {
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      min-width: 0;
-      padding: 34px 44px 28px;
-      gap: 24px;
-    }
-    .kicker {
-      color: var(--accent);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      letter-spacing: 0.32em;
-      text-transform: uppercase;
-    }
-    h1 {
-      margin: 18px 0 12px;
-      font-size: 54px;
-      line-height: 0.92;
-      font-weight: 500;
-      letter-spacing: 0;
-    }
-    h2 {
-      margin: 0 0 14px;
-      font-size: 18px;
-      font-weight: 600;
-    }
-    p {
-      color: var(--muted);
-      font-size: 15px;
-      line-height: 1.45;
-      margin: 0;
-    }
-    .rule {
-      width: 96px;
-      height: 3px;
-      background: var(--accent);
-      margin: 20px 0 0;
-    }
-    .panel {
-      border: 1px solid var(--rule);
-      background: var(--panel);
-      border-radius: 8px;
-      padding: 14px;
-    }
-    .stack { display: grid; gap: 14px; }
-    label {
-      display: block;
-      margin-bottom: 8px;
-      color: var(--muted);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      letter-spacing: 0.22em;
-      text-transform: uppercase;
-    }
-    input, textarea, button, select {
-      font: inherit;
-    }
-    input[type="text"], input[type="password"], input[type="number"], textarea, select {
-      width: 100%;
-      border: 1px solid var(--rule);
-      border-radius: 6px;
-      background: var(--field);
-      color: var(--ink);
-      padding: 10px 11px;
-      outline: none;
-    }
-    input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, textarea:focus, select:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--focus);
-    }
-    textarea {
-      min-height: 118px;
-      resize: vertical;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 14px;
-      line-height: 1.45;
-    }
-    input[type="file"] {
-      width: 100%;
-      color: var(--muted);
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 12px;
-      min-width: 0;
-    }
-    button {
-      border: 1px solid var(--accent);
-      border-radius: 6px;
-      background: var(--accent);
-      color: white;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 14px;
-      min-width: 0;
-    }
-    button.secondary {
-      background: transparent;
-      color: var(--accent);
-    }
-    button.ghost {
-      border-color: transparent;
-      background: transparent;
-      color: var(--muted);
-      padding: 6px 8px;
-    }
-    button:disabled {
-      cursor: wait;
-      opacity: 0.62;
-    }
-    .brand p { max-width: 280px; }
-    .auth-line {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      color: var(--muted);
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 12px;
-      border-top: 1px solid var(--rule);
-      padding-top: 10px;
-    }
-    .auth-line a {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-    }
-    .theme-toggle {
-      margin-top: 10px;
-      width: 100%;
-      background: transparent;
-      color: var(--accent);
-    }
-    .session-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 8px;
-      border-top: 1px solid var(--rule);
-      padding: 10px 0 0;
-    }
-    .session-list {
-      display: grid;
-      gap: 8px;
-      max-height: 220px;
-      overflow: auto;
-    }
-    .session-btn {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      width: 100%;
-      border: 1px solid var(--rule);
-      background: #fffefa;
-      color: var(--ink);
-      text-align: left;
-      padding: 9px 10px;
-    }
-    .session-btn.active {
-      border-color: var(--accent);
-      background: var(--accent-soft);
-    }
-    .session-title {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 13px;
-    }
-    .session-count {
-      color: var(--quiet);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-    }
-    .topbar {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(240px, auto) auto;
-      align-items: end;
-      gap: 22px;
-      border-bottom: 1px solid var(--rule);
-      padding-bottom: 18px;
-    }
-    .page-title {
-      margin: 0;
-      max-width: 760px;
-      font-size: clamp(38px, 5vw, 60px);
-      line-height: 1;
-      font-weight: 500;
-    }
-    .session-meta {
-      text-align: right;
-      color: var(--quiet);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-    }
-    .model-pill {
-      min-width: 240px;
-      border-left: 3px solid var(--accent);
-      background: var(--message);
-      padding: 10px 12px;
-      text-align: left;
-    }
-    .model-pill-label {
-      color: var(--quiet);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      letter-spacing: 0.24em;
-      text-transform: uppercase;
-    }
-    .model-pill-main {
-      margin-top: 5px;
-      color: var(--ink);
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 13px;
-      line-height: 1.25;
-      overflow-wrap: anywhere;
-    }
-    .model-pill-sub {
-      margin-top: 3px;
-      color: var(--muted);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      letter-spacing: 0.08em;
-    }
-    .messages {
-      overflow: auto;
-      display: grid;
-      align-content: start;
-      gap: 16px;
-      padding-right: 4px;
-    }
-    .message {
-      max-width: 920px;
-      border-left: 3px solid var(--accent);
-      background: var(--message);
-      padding: 15px 17px;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 14px;
-      line-height: 1.48;
-    }
-    .message :first-child { margin-top: 0; }
-    .message :last-child { margin-bottom: 0; }
-    .message h1, .message h2, .message h3 {
-      margin: 0.35em 0 0.25em;
-      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
-      line-height: 1.1;
-    }
-    .message h1 { font-size: 24px; }
-    .message h2 { font-size: 20px; }
-    .message h3 { font-size: 17px; }
-    .message p, .message li {
-      color: var(--ink);
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 14px;
-    }
-    .message ul, .message ol {
-      margin: 0.45em 0 0.75em 1.4em;
-      padding: 0;
-    }
-    .message table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 0.8em 0 1em;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 13px;
-      background: #fffefa;
-    }
-    .message th {
-      color: var(--accent);
-      text-align: left;
-      background: #f2efe7;
-      border-bottom: 1px solid var(--rule);
-      padding: 8px 9px;
-      font-weight: 700;
-    }
-    .message td {
-      border-bottom: 1px solid var(--rule);
-      padding: 8px 9px;
-      vertical-align: top;
-    }
-    .message code {
-      background: #f2efe7;
-      border: 1px solid var(--rule);
-      border-radius: 4px;
-      padding: 1px 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 13px;
-    }
-    .message pre {
-      overflow: auto;
-      background: #fbfaf6;
-      border: 1px solid var(--rule);
-      border-radius: 8px;
-      padding: 12px;
-    }
-    .message.user {
-      border-left-color: var(--muted);
-      background: transparent;
-      justify-self: end;
-      max-width: 760px;
-      white-space: pre-wrap;
-    }
-    .message.error {
-      border-left-color: var(--danger);
-      color: var(--danger);
-      white-space: pre-wrap;
-    }
-    .activity {
-      margin-top: 12px;
-      border-top: 1px solid var(--rule);
-      padding-top: 10px;
-    }
-    .activity details {
-      display: grid;
-      gap: 8px;
-    }
-    .activity summary {
-      cursor: pointer;
-      color: var(--accent);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      user-select: none;
-    }
-    .activity-body {
-      display: grid;
-      gap: 8px;
-      max-height: 260px;
-      overflow: auto;
-      padding-top: 8px;
-    }
-    .activity-empty {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .outputs {
-      display: grid;
-      gap: 9px;
-      margin-top: 12px;
-      max-height: 210px;
-      overflow: auto;
-    }
-    .logs {
-      display: grid;
-      gap: 8px;
-      max-height: 260px;
-      overflow: auto;
-      margin-top: 12px;
-    }
-    .log-item {
-      border-top: 1px solid var(--rule);
-      padding-top: 8px;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 12px;
-      line-height: 1.35;
-    }
-    .log-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      color: var(--accent);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-    .log-detail {
-      margin-top: 3px;
-      color: var(--muted);
-    }
-    .artifact {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      gap: 10px;
-      border-top: 1px solid var(--rule);
-      padding-top: 9px;
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 13px;
-    }
-    .artifact a {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      min-width: 0;
-    }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .hint {
-      margin-top: 10px;
-      color: var(--muted);
-      font-family: ui-sans-serif, system-ui, sans-serif;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .composer {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 12px;
-      align-items: end;
-      border-top: 1px solid var(--rule);
-      padding-top: 18px;
-    }
-    .row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    @media (max-width: 860px) {
-      .shell { grid-template-columns: 1fr; }
-      aside { border-right: 0; border-bottom: 1px solid var(--rule); position: static; max-height: none; }
-      main { padding: 24px 18px; }
-      .topbar { grid-template-columns: 1fr; }
-      .session-meta { text-align: left; }
-      .model-pill { min-width: 0; }
-      .composer { grid-template-columns: 1fr; }
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <aside>
-      <section class="brand">
-        <div class="kicker">Local Agent · LangGraph</div>
-        <h1>Code Assist</h1>
-        <p>Research, upload, and generate warm editorial decks or analyst documents from one local workspace.</p>
-        <div class="rule"></div>
-        <div class="auth-line">
-          <span id="authStatus">Auth checking...</span>
-          <a id="logoutLink" href="/auth/logout" style="display:none;">Logout</a>
-        </div>
-        <button class="secondary theme-toggle" id="themeToggle" type="button">Dark theme</button>
-      </section>
-      <div class="stack">
-        <section class="panel">
-          <h2>Model</h2>
-          <div class="stack">
-            <div>
-              <label for="providerSelect">Provider</label>
-              <select id="providerSelect">
-                <option value="openrouter">OpenRouter</option>
-                <option value="openai">OpenAI</option>
-              </select>
-            </div>
-            <div>
-              <label for="modelInput">Model</label>
-              <input id="modelInput" type="text" placeholder="openai/gpt-4o-mini" />
-            </div>
-            <div>
-              <label for="apiKeyInput">API key</label>
-              <input id="apiKeyInput" type="password" placeholder="Leave blank to keep existing key" />
-            </div>
-            <div>
-              <label for="temperatureInput">Temperature</label>
-              <input id="temperatureInput" type="number" step="0.1" min="0" max="2" value="0.2" />
-            </div>
-            <button id="saveModelBtn">Apply model</button>
-          </div>
-          <div id="modelStatus" class="hint"></div>
-        </section>
-        <section class="panel">
-          <h2>Sessions</h2>
-          <div class="session-row">
-            <input id="newSessionName" type="text" placeholder="New session name" />
-            <button id="newSessionBtn">New</button>
-          </div>
-          <div id="sessionList" class="session-list" style="margin-top: 12px;"></div>
-          <div class="row" style="margin-top: 12px;">
-            <button class="secondary" id="clearSessionBtn">Clear current</button>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>Upload</h2>
-          <input id="fileInput" type="file" />
-          <div class="row" style="margin-top: 12px;">
-            <button id="uploadBtn">Upload file</button>
-            <button class="secondary" id="refreshBtn">Refresh</button>
-          </div>
-          <div id="uploadStatus" class="hint"></div>
-        </section>
-        <section class="panel">
-          <h2>Outputs</h2>
-          <div id="outputs" class="outputs"></div>
-        </section>
-      </div>
-    </aside>
-    <main>
-      <header class="topbar">
-        <div>
-          <div class="kicker" id="sessionKicker">01 · DEFAULT</div>
-          <h1 class="page-title" id="sessionHeading">Agent workspace</h1>
-        </div>
-        <div class="model-pill" aria-live="polite">
-          <div class="model-pill-label">Active model</div>
-          <div class="model-pill-main" id="activeModelName">Loading model...</div>
-          <div class="model-pill-sub" id="activeModelMeta">Provider unknown</div>
-        </div>
-        <div class="session-meta">
-          <div>Session ID</div>
-          <div id="sessionIdLabel">default</div>
-        </div>
-      </header>
-      <section id="messages" class="messages">
-      </section>
-      <section class="composer">
-        <div>
-          <label for="prompt">Message</label>
-          <textarea id="prompt" placeholder="Ask the agent to research, read uploads, or create PPT/DOCX/XLSX outputs..."></textarea>
-        </div>
-        <button id="sendBtn">Send</button>
-      </section>
-    </main>
-  </div>
-  <script>
-    const messages = document.getElementById('messages');
-    const outputs = document.getElementById('outputs');
-    const prompt = document.getElementById('prompt');
-    const sessionList = document.getElementById('sessionList');
-    const newSessionName = document.getElementById('newSessionName');
-    const sessionKicker = document.getElementById('sessionKicker');
-    const sessionHeading = document.getElementById('sessionHeading');
-    const sessionIdLabel = document.getElementById('sessionIdLabel');
-    const activeModelName = document.getElementById('activeModelName');
-    const activeModelMeta = document.getElementById('activeModelMeta');
-    const providerSelect = document.getElementById('providerSelect');
-    const modelInput = document.getElementById('modelInput');
-    const apiKeyInput = document.getElementById('apiKeyInput');
-    const temperatureInput = document.getElementById('temperatureInput');
-    const saveModelBtn = document.getElementById('saveModelBtn');
-    const modelStatus = document.getElementById('modelStatus');
-    const sendBtn = document.getElementById('sendBtn');
-    const newSessionBtn = document.getElementById('newSessionBtn');
-    const clearSessionBtn = document.getElementById('clearSessionBtn');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const refreshBtn = document.getElementById('refreshBtn');
-    const fileInput = document.getElementById('fileInput');
-    const uploadStatus = document.getElementById('uploadStatus');
-    const authStatus = document.getElementById('authStatus');
-    const logoutLink = document.getElementById('logoutLink');
-    const themeToggle = document.getElementById('themeToggle');
-    const STORAGE_KEY = 'code-assist-langgraph-ui-sessions';
-    const MODEL_STORAGE_KEY = 'code-assist-langgraph-model-config';
-    const THEME_STORAGE_KEY = 'code-assist-langgraph-theme';
-    let state = loadState();
-    let activeSessionId = state.activeSessionId || ensureDefaultSession().id;
-    let logPoll = null;
-
-    function slug(value) {
-      return (value || 'session')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 48) || 'session';
-    }
-
-    function loadState() {
-      try {
-        const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-        if (!parsed.sessions) parsed.sessions = {};
-        return parsed;
-      } catch {
-        return { sessions: {} };
-      }
-    }
-
-    function saveState() {
-      state.activeSessionId = activeSessionId;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }
-
-    function applyTheme(theme) {
-      const normalized = theme === 'dark' ? 'dark' : 'light';
-      document.documentElement.dataset.theme = normalized;
-      themeToggle.textContent = normalized === 'dark' ? 'Light theme' : 'Dark theme';
-      localStorage.setItem(THEME_STORAGE_KEY, normalized);
-    }
-
-    function loadTheme() {
-      const stored = localStorage.getItem(THEME_STORAGE_KEY);
-      if (stored === 'dark' || stored === 'light') return stored;
-      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-
-    function loadPersistedModelConfig() {
-      try {
-        return JSON.parse(localStorage.getItem(MODEL_STORAGE_KEY) || '{}');
-      } catch {
-        return {};
-      }
-    }
-
-    function persistModelConfig(config) {
-      const safeConfig = {
-        provider: config.provider || providerSelect.value || 'openrouter',
-        model: config.model || modelInput.value || '',
-        temperature: Number(config.temperature ?? temperatureInput.value ?? 0.2),
-        api_key_set: Boolean(config.api_key_set),
-        updated_at: Date.now()
-      };
-      localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(safeConfig));
-      updateModelDisplay(safeConfig);
-    }
-
-    function hydrateModelControlsFromStorage() {
-      const stored = loadPersistedModelConfig();
-      if (!stored.model && !stored.provider) {
-        updateModelDisplay({ provider: 'unknown', model: 'Loading model...', api_key_set: false });
-        return;
-      }
-      providerSelect.value = stored.provider || 'openrouter';
-      modelInput.value = stored.model || '';
-      temperatureInput.value = stored.temperature ?? 0.2;
-      updateModelDisplay(stored);
-    }
-
-    function updateModelDisplay(config) {
-      const provider = config.provider || 'unknown';
-      const model = config.model || 'No model selected';
-      const keyText = config.api_key_set ? 'key set' : 'key missing';
-      activeModelName.textContent = model;
-      activeModelMeta.textContent = `${provider} · ${keyText}`;
-    }
-
-    function ensureDefaultSession() {
-      state.sessions = state.sessions || {};
-      if (!state.sessions.default) {
-        state.sessions.default = {
-          id: 'default',
-          title: 'Default',
-          messages: [
-            { kind: '', text: 'Try: “Create a warm editorial PPT from the uploaded README” or “Research LangGraph memory and write a Word brief.”' }
-          ],
-          createdAt: Date.now()
-        };
-      }
-      return state.sessions.default;
-    }
-
-    function currentSession() {
-      ensureDefaultSession();
-      if (!state.sessions[activeSessionId]) activeSessionId = 'default';
-      return state.sessions[activeSessionId];
-    }
-
-    function addMessage(text, kind = '') {
-      currentSession().messages.push({ text, kind });
-      saveState();
-      renderMessages();
-    }
-
-    function renderMessages() {
-      messages.innerHTML = '';
-      const session = currentSession();
-      if (!session.messages.length) {
-        session.messages.push({ kind: '', text: 'Start with an uploaded file, a research question, or a document request.' });
-      }
-      for (const item of session.messages) {
-        appendMessageNode(item);
-      }
-    }
-
-    function appendMessageNode(itemOrText, fallbackKind = '') {
-      const item = typeof itemOrText === 'string' ? { text: itemOrText, kind: fallbackKind } : itemOrText;
-      const node = document.createElement('div');
-      node.className = `message ${item.kind || ''}`;
-      if (item.kind === 'user' || item.kind === 'error') {
-        node.textContent = item.text;
-      } else {
-        node.innerHTML = renderMarkdown(item.text);
-        if (item.activity) {
-          node.insertAdjacentHTML('beforeend', renderActivity(item.logs || [], item.activityOpen !== false));
-        }
-      }
-      messages.appendChild(node);
-      messages.scrollTop = messages.scrollHeight;
-      return node;
-    }
-
-    function renderActivity(logs, open) {
-      const count = logs.length;
-      const summary = count === 1 ? 'Agent activity · 1 step' : `Agent activity · ${count} steps`;
-      const body = count
-        ? logs.map(item => `<div class="log-item"><div class="log-head"><span>${escapeHtml(item.kind)} · ${escapeHtml(item.title)}</span><span>${escapeHtml(item.time)}</span></div><div class="log-detail">${escapeHtml(item.detail || '')}</div></div>`).join('')
-        : '<div class="activity-empty">Waiting for the first activity event...</div>';
-      return `<div class="activity"><details ${open ? 'open' : ''}><summary>${escapeHtml(summary)}</summary><div class="activity-body">${body}</div></details></div>`;
-    }
-
-    function renderMarkdown(text) {
-      const lines = String(text || '').replace(/\\r\\n/g, '\\n').split('\\n');
-      const html = [];
-      let paragraph = [];
-      let list = null;
-      let inCode = false;
-      let codeLines = [];
-
-      function flushParagraph() {
-        if (!paragraph.length) return;
-        html.push(`<p>${renderInline(paragraph.join(' '))}</p>`);
-        paragraph = [];
-      }
-      function flushList() {
-        if (!list) return;
-        html.push(`<${list.type}>${list.items.map(item => `<li>${renderInline(item)}</li>`).join('')}</${list.type}>`);
-        list = null;
-      }
-      function flushCode() {
-        if (!inCode) return;
-        html.push(`<pre><code>${escapeHtml(codeLines.join('\\n'))}</code></pre>`);
-        inCode = false;
-        codeLines = [];
-      }
-
-      for (let index = 0; index < lines.length; index++) {
-        const raw = lines[index];
-        const line = raw.trimEnd();
-        if (line.startsWith('```')) {
-          if (inCode) {
-            flushCode();
-          } else {
-            flushParagraph();
-            flushList();
-            inCode = true;
-            codeLines = [];
-          }
-          continue;
-        }
-        if (inCode) {
-          codeLines.push(raw);
-          continue;
-        }
-        if (!line.trim() || line.trim() === '---') {
-          flushParagraph();
-          flushList();
-          continue;
-        }
-        if (isTableStart(lines, index)) {
-          flushParagraph();
-          flushList();
-          const table = consumeTable(lines, index);
-          html.push(table.html);
-          index = table.nextIndex - 1;
-          continue;
-        }
-        const heading = line.match(/^(#{1,6})\\s+(.+)$/);
-        if (heading) {
-          flushParagraph();
-          flushList();
-          const level = Math.min(3, heading[1].length);
-          html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-          continue;
-        }
-        const boldHeading = line.match(/^\\*\\*(.+?)\\*\\*:?$/);
-        if (boldHeading && line.length < 90) {
-          flushParagraph();
-          flushList();
-          html.push(`<h3>${renderInline(boldHeading[1])}</h3>`);
-          continue;
-        }
-        const unordered = line.match(/^[-*]\\s+(.+)$/);
-        const ordered = line.match(/^\\d+[.)]\\s+(.+)$/);
-        if (unordered || ordered) {
-          flushParagraph();
-          const type = unordered ? 'ul' : 'ol';
-          if (!list || list.type !== type) {
-            flushList();
-            list = { type, items: [] };
-          }
-          list.items.push((unordered || ordered)[1]);
-          continue;
-        }
-        paragraph.push(line.trim());
-      }
-      flushCode();
-      flushParagraph();
-      flushList();
-      return html.join('');
-    }
-
-    function isTableStart(lines, index) {
-      const current = lines[index]?.trim();
-      const next = lines[index + 1]?.trim();
-      return current?.startsWith('|') && current.endsWith('|') && /^\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?$/.test(next || '');
-    }
-
-    function consumeTable(lines, start) {
-      const headers = splitTableRow(lines[start]);
-      let index = start + 2;
-      const rows = [];
-      while (index < lines.length) {
-        const line = lines[index].trim();
-        if (!line.startsWith('|') || !line.endsWith('|')) break;
-        rows.push(splitTableRow(line));
-        index++;
-      }
-      const head = headers.map(cell => `<th>${renderInline(cell)}</th>`).join('');
-      const body = rows.map(row => `<tr>${headers.map((_, i) => `<td>${renderInline(row[i] || '')}</td>`).join('')}</tr>`).join('');
-      return { html: `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`, nextIndex: index };
-    }
-
-    function splitTableRow(line) {
-      return line.replace(/^\\|/, '').replace(/\\|$/, '').split('|').map(cell => cell.trim());
-    }
-
-    function renderInline(value) {
-      return escapeHtml(value)
-        .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-    }
-
-    function renderSessions() {
-      ensureDefaultSession();
-      sessionList.innerHTML = '';
-      const sessions = Object.values(state.sessions).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-      sessions.forEach((session, index) => {
-        const button = document.createElement('button');
-        button.className = `session-btn ${session.id === activeSessionId ? 'active' : ''}`;
-        button.innerHTML = `<span class="session-title">${session.title}</span><span class="session-count">${String(index + 1).padStart(2, '0')}</span>`;
-        button.addEventListener('click', () => switchSession(session.id));
-        sessionList.appendChild(button);
-      });
-      const session = currentSession();
-      sessionKicker.textContent = `${String(sessions.findIndex(s => s.id === session.id) + 1).padStart(2, '0')} · ${session.title}`.toUpperCase();
-      sessionHeading.textContent = session.title === 'Default' ? 'Agent workspace' : session.title;
-      sessionIdLabel.textContent = session.id;
-    }
-
-    function renderOutputs(items) {
-      outputs.innerHTML = '';
-      if (!items.length) {
-        outputs.innerHTML = '<div class="hint">No generated files yet.</div>';
-        return;
-      }
-      for (const item of items) {
-        const row = document.createElement('div');
-        row.className = 'artifact';
-        const name = document.createElement('a');
-        name.href = item.download_url || `/download/${item.path}`;
-        name.textContent = item.path;
-        name.target = '_blank';
-        const size = document.createElement('span');
-        size.textContent = `${Math.ceil((item.size || 0) / 1024)} KB`;
-        row.appendChild(name);
-        row.appendChild(size);
-        outputs.appendChild(row);
-      }
-    }
-
-    async function fetchLogs() {
-      const response = await fetch(`/api/runs/${encodeURIComponent(activeSessionId)}/logs`);
-      return await response.json();
-    }
-
-    function latestActivityMessage() {
-      const session = currentSession();
-      for (let index = session.messages.length - 1; index >= 0; index--) {
-        if (session.messages[index].activity) return session.messages[index];
-      }
-      return null;
-    }
-
-    async function refreshLogs() {
-      const target = latestActivityMessage();
-      if (!target) return;
-      target.logs = await fetchLogs();
-      target.activityOpen = true;
-      saveState();
-      renderMessages();
-    }
-
-    function startLogPolling() {
-      stopLogPolling();
-      refreshLogs();
-      logPoll = setInterval(refreshLogs, 1200);
-    }
-
-    function stopLogPolling() {
-      if (logPoll) clearInterval(logPoll);
-      logPoll = null;
-    }
-
-    async function refreshOutputs() {
-      const response = await fetch('/outputs');
-      renderOutputs(await response.json());
-    }
-
-    async function loadModelConfig() {
-      const response = await fetch('/api/model-config');
-      const data = await response.json();
-      providerSelect.value = data.provider || 'openrouter';
-      modelInput.value = data.model || (providerSelect.value === 'openrouter' ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
-      temperatureInput.value = data.temperature ?? 0.2;
-      persistModelConfig(data);
-      modelStatus.textContent = data.api_key_set
-        ? `Using ${data.provider} · key is set in this server process.`
-        : `No API key set for this server process. Paste one here or restart from a terminal that has it.`;
-    }
-
-    async function loadAuthStatus() {
-      try {
-        const response = await fetch('/auth/me');
-        const data = await response.json();
-        if (!data.auth_enabled) {
-          authStatus.textContent = 'Auth disabled for local dev';
-          return;
-        }
-        if (data.user) {
-          const provider = data.provider ? `${data.provider} · ` : '';
-          authStatus.textContent = provider + (data.user.email || data.user.name || 'Authenticated');
-          logoutLink.style.display = '';
-        } else {
-          authStatus.textContent = data.auth_ready ? 'Not authenticated' : `${data.provider || 'auth'} not configured`;
-        }
-      } catch {
-        authStatus.textContent = 'Auth status unavailable';
-      }
-    }
-
-    async function saveModelConfig() {
-      saveModelBtn.disabled = true;
-      modelStatus.textContent = 'Applying model config...';
-      try {
-        const response = await fetch('/api/model-config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: providerSelect.value,
-            model: modelInput.value,
-            api_key: apiKeyInput.value,
-            temperature: Number(temperatureInput.value || 0.2)
-          })
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Failed to update model config');
-        apiKeyInput.value = '';
-        persistModelConfig(data);
-        modelStatus.textContent = `Applied ${data.provider} · ${data.model} · key ${data.api_key_set ? 'set' : 'missing'}.`;
-        addMessage(`Model config updated: ${data.provider} · ${data.model}`);
-      } catch (error) {
-        modelStatus.textContent = error.message;
-      } finally {
-        saveModelBtn.disabled = false;
-      }
-    }
-
-    async function uploadFile() {
-      const file = fileInput.files[0];
-      if (!file) {
-        uploadStatus.textContent = 'Choose a file first.';
-        return;
-      }
-      uploadBtn.disabled = true;
-      uploadStatus.textContent = 'Uploading...';
-      try {
-        const form = new FormData();
-        form.append('file', file);
-        const response = await fetch('/upload', { method: 'POST', body: form });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Upload failed');
-        uploadStatus.textContent = `Uploaded ${data.path}`;
-        addMessage(`Uploaded file: ${data.path}`);
-      } catch (error) {
-        uploadStatus.textContent = error.message;
-      } finally {
-        uploadBtn.disabled = false;
-      }
-    }
-
-    async function sendMessage() {
-      const message = prompt.value.trim();
-      if (!message) return;
-      prompt.value = '';
-      addMessage(message, 'user');
-      sendBtn.disabled = true;
-      currentSession().messages.push({ text: 'Working...', kind: '', activity: true, activityOpen: true, logs: [] });
-      saveState();
-      renderMessages();
-      const workingIndex = currentSession().messages.length - 1;
-      startLogPolling();
-      try {
-        const response = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, session_id: activeSessionId })
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Agent call failed');
-        const logs = await fetchLogs();
-        currentSession().messages[workingIndex] = {
-          text: data.response || '(no response)',
-          kind: '',
-          activity: true,
-          activityOpen: false,
-          logs
-        };
-        saveState();
-        renderMessages();
-        renderOutputs(data.outputs || []);
-      } catch (error) {
-        let logs = [];
-        try {
-          logs = await fetchLogs();
-        } catch {
-          logs = currentSession().messages[workingIndex]?.logs || [];
-        }
-        currentSession().messages[workingIndex] = {
-          text: error.message,
-          kind: 'error',
-          activity: true,
-          activityOpen: true,
-          logs
-        };
-        saveState();
-        renderMessages();
-      } finally {
-        sendBtn.disabled = false;
-        stopLogPolling();
-      }
-    }
-
-    function switchSession(id) {
-      activeSessionId = id;
-      saveState();
-      renderSessions();
-      renderMessages();
-    }
-
-    function createSession() {
-      const title = newSessionName.value.trim() || `Session ${Object.keys(state.sessions).length + 1}`;
-      let id = slug(title);
-      let counter = 2;
-      while (state.sessions[id]) {
-        id = `${slug(title)}-${counter++}`;
-      }
-      state.sessions[id] = {
-        id,
-        title,
-        messages: [{ kind: '', text: `New session: ${title}` }],
-        createdAt: Date.now()
-      };
-      newSessionName.value = '';
-      switchSession(id);
-    }
-
-    function clearCurrentSession() {
-      const session = currentSession();
-      session.messages = [{ kind: '', text: `Cleared session: ${session.title}` }];
-      saveState();
-      renderMessages();
-      renderSessions();
-    }
-
-    saveModelBtn.addEventListener('click', saveModelConfig);
-    providerSelect.addEventListener('change', () => {
-      if (!modelInput.value || modelInput.value === 'gpt-4o-mini' || modelInput.value === 'openai/gpt-4o-mini') {
-        modelInput.value = providerSelect.value === 'openrouter' ? 'openai/gpt-4o-mini' : 'gpt-4o-mini';
-      }
-      updateModelDisplay({
-        provider: providerSelect.value,
-        model: modelInput.value,
-        api_key_set: loadPersistedModelConfig().api_key_set
-      });
-    });
-    modelInput.addEventListener('input', () => {
-      updateModelDisplay({
-        provider: providerSelect.value,
-        model: modelInput.value,
-        api_key_set: loadPersistedModelConfig().api_key_set
-      });
-    });
-    newSessionBtn.addEventListener('click', createSession);
-    clearSessionBtn.addEventListener('click', clearCurrentSession);
-    uploadBtn.addEventListener('click', uploadFile);
-    refreshBtn.addEventListener('click', refreshOutputs);
-    sendBtn.addEventListener('click', sendMessage);
-    themeToggle.addEventListener('click', () => {
-      applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-    });
-    prompt.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) sendMessage();
-    });
-    newSessionName.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') createSession();
-    });
-    ensureDefaultSession();
-    applyTheme(loadTheme());
-    hydrateModelControlsFromStorage();
-    renderSessions();
-    renderMessages();
-    loadModelConfig();
-    loadAuthStatus();
-    refreshOutputs();
-  </script>
-</body>
-</html>
-"""
